@@ -11,6 +11,7 @@ import {
   type NodeChange,
   type XYPosition,
 } from "@xyflow/react";
+import { findFreeSpot, type Rect } from "../canvas/placement";
 
 export interface TerminalNodeData extends Record<string, unknown> {
   label: string;
@@ -49,6 +50,25 @@ interface WorkspaceState {
   setWorkspace: (nodes: PodiumNode[], edges: Edge[]) => void;
   /** Applies shell directories by terminal id; no-op when nothing changed. */
   applyTerminalCwds: (cwds: Record<string, string>) => void;
+  /** Spawns a plain shell the size of each source terminal in the nearest
+   *  free spot around it, and selects the new terminals. */
+  pasteTerminals: (sources: TerminalClip[]) => void;
+}
+
+/** Copied terminal: its id plus its rect at copy time, used if the source
+ *  has been closed before pasting. */
+export interface TerminalClip {
+  id: string;
+  rect: Rect;
+}
+
+export function nodeRect(node: PodiumNode): Rect {
+  return {
+    x: node.position.x,
+    y: node.position.y,
+    width: node.width ?? node.measured?.width ?? 640,
+    height: node.height ?? node.measured?.height ?? 400,
+  };
 }
 
 function nextLabel(nodes: PodiumNode[]): string {
@@ -154,5 +174,39 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         return { ...n, data: { ...n.data, cwd } };
       });
       return changed ? { nodes } : state;
+    }),
+
+  pasteTerminals: (sources) =>
+    set((state) => {
+      const occupied = state.nodes.map(nodeRect);
+      const created: TerminalFlowNode[] = [];
+      for (const clip of sources) {
+        const source = state.nodes.find((n) => n.id === clip.id);
+        const rect = source ? nodeRect(source) : clip.rect;
+        const position = findFreeSpot(rect, occupied);
+        occupied.push({ ...rect, ...position });
+        created.push({
+          id: crypto.randomUUID(),
+          type: "terminal",
+          position,
+          data: {
+            label: nextLabel([...state.nodes, ...created]),
+            autoStart: true,
+          },
+          dragHandle: ".terminal-node__header",
+          width: rect.width,
+          height: rect.height,
+          selected: true,
+        });
+      }
+      if (created.length === 0) return state;
+      return {
+        nodes: [
+          ...state.nodes.map((n) =>
+            n.selected ? ({ ...n, selected: false } as PodiumNode) : n,
+          ),
+          ...created,
+        ],
+      };
     }),
 }));
