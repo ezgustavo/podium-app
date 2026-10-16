@@ -12,12 +12,15 @@ import { NoteNode } from "../nodes/NoteNode";
 import { Toolbar } from "./Toolbar";
 import { useTerminalClipboard } from "./useTerminalClipboard";
 import { useCanvasNavigation } from "./useCanvasNavigation";
+import { useCrispViewport } from "./useCrispViewport";
 import { useWorkspaceStore } from "../store/workspace";
 
 const nodeTypes = { terminal: TerminalNode, note: NoteNode };
 
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 2;
+/** Whole-pixel node positions/sizes keep terminal text crisp at 100%. */
+const PIXEL_GRID: [number, number] = [1, 1];
 
 function CanvasInner() {
   const nodes = useWorkspaceStore((s) => s.nodes);
@@ -29,6 +32,7 @@ function CanvasInner() {
   const wrapperRef = useRef<HTMLDivElement>(null);
   useTerminalClipboard();
   useCanvasNavigation(wrapperRef, MIN_ZOOM, MAX_ZOOM);
+  useCrispViewport(wrapperRef);
 
   return (
     <ReactFlow
@@ -44,6 +48,8 @@ function CanvasInner() {
       maxZoom={MAX_ZOOM}
       proOptions={{ hideAttribution: true }}
       deleteKeyCode={null}
+      snapToGrid
+      snapGrid={PIXEL_GRID}
     >
       <Background variant={BackgroundVariant.Dots} gap={24} size={1.5} />
       <Controls />
