@@ -46,6 +46,13 @@ function isPasteShortcut(e: KeyboardEvent): boolean {
   return e.shiftKey || IS_WINDOWS;
 }
 
+/** Ctrl+Enter / Shift+Enter insert a line break in agent prompts. */
+function isNewlineShortcut(e: KeyboardEvent): boolean {
+  return (
+    e.key === "Enter" && (e.ctrlKey || e.shiftKey) && !e.altKey && !e.metaKey
+  );
+}
+
 /** Last non-empty lines of the terminal buffer (scrollback included). */
 function lastLines(term: Terminal, max: number): string {
   const buffer = term.buffer.active;
@@ -183,6 +190,15 @@ function TerminalNodeComponent({
       // Skipping xterm lets the webview fire a native `paste` on its textarea;
       // xterm then sends the text (bracketed when the app asked for it).
       if (isPasteShortcut(e)) return false;
+      if (isNewlineShortcut(e)) {
+        // xterm sends a bare \r for any Enter, which submits. A line feed is
+        // what Claude Code / Codex read as "new line" (same as Ctrl+J).
+        if (e.type === "keydown") {
+          e.preventDefault();
+          void pty.writeToTerminal(id, "\n").catch(() => {});
+        }
+        return false;
+      }
       return true;
     });
 
