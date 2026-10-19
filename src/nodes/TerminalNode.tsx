@@ -30,6 +30,22 @@ const CAPTURE_LINES = 20;
 /** Gives the shell time to run the submitted line and redraw its prompt. */
 const CWD_SYNC_DELAY_MS = 500;
 
+const IS_MAC = navigator.userAgent.includes("Mac");
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
+/** Ctrl+V as a raw control byte (what the PTY got before paste was wired). */
+const CTRL_V = "\x16";
+
+/**
+ * Ctrl+V (Windows) and Ctrl+Shift+V (Windows/Linux) paste from the system
+ * clipboard. macOS already pastes with Cmd+V, so Ctrl+V still reaches the PTY.
+ */
+function isPasteShortcut(e: KeyboardEvent): boolean {
+  if (IS_MAC || !e.ctrlKey || e.altKey || e.metaKey || e.code !== "KeyV") {
+    return false;
+  }
+  return e.shiftKey || IS_WINDOWS;
+}
+
 /** Last non-empty lines of the terminal buffer (scrollback included). */
 function lastLines(term: Terminal, max: number): string {
   const buffer = term.buffer.active;
@@ -163,6 +179,23 @@ function TerminalNodeComponent({
         .catch(() => {});
     };
 
+    term.attachCustomKeyEventHandler((e) => {
+      // Skipping xterm lets the webview fire a native `paste` on its textarea;
+      // xterm then sends the text (bracketed when the app asked for it).
+      if (isPasteShortcut(e)) return false;
+      return true;
+    });
+
+    // Clipboard without text (e.g. a screenshot): forward the raw Ctrl+V so
+    // agents that read the clipboard themselves can still attach it.
+    const onPaste = (e: ClipboardEvent) => {
+      if ((e.clipboardData?.getData("text/plain") ?? "") !== "") return;
+      e.preventDefault();
+      e.stopPropagation();
+      void pty.writeToTerminal(id, CTRL_V).catch(() => {});
+    };
+    container.addEventListener("paste", onPaste, true);
+
     const dataSub = term.onData((input) => {
       // Ignore rejections: the PTY may have already exited.
       void pty.writeToTerminal(id, input).catch(() => {});
@@ -179,6 +212,7 @@ function TerminalNodeComponent({
 
     return () => {
       clearTimeout(cwdTimer);
+      container.removeEventListener("paste", onPaste, true);
       observer.disconnect();
       dataSub.dispose();
       resizeSub.dispose();
