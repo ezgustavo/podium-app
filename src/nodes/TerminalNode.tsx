@@ -3,6 +3,7 @@ import {
   Handle,
   NodeResizer,
   Position,
+  type Edge,
   type NodeProps,
 } from "@xyflow/react";
 import { Terminal } from "@xterm/xterm";
@@ -11,14 +12,15 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import type {
   NoteNodeData,
+  PodiumNode,
   TerminalFlowNode,
-  TerminalNodeData,
 } from "../store/workspace";
 import { useWorkspaceStore } from "../store/workspace";
 import { useSettingsStore } from "../store/settings";
 import * as pty from "../lib/pty";
 import { resumeCommand } from "../lib/agents";
 import { enqueueLaunch } from "../lib/launchQueue";
+import { registerRenderer } from "../lib/webglBudget";
 
 type TerminalStatus = "idle" | "starting" | "running" | "exited";
 
@@ -30,6 +32,11 @@ const TERMINAL_THEME = {
 };
 
 const CAPTURE_LINES = 20;
+/** xterm write-queue backpressure: above HIGH bytes not yet parsed, the
+ *  backend holds this terminal's output; below LOW it resumes (restoring the
+ *  view from its screen mirror). The PTY itself is never paused. */
+const OUTPUT_HIGH_WATER = 4 * 1024 * 1024;
+const OUTPUT_LOW_WATER = 512 * 1024;
 /** Gives the shell time to run the submitted line and redraw its prompt. */
 const CWD_SYNC_DELAY_MS = 500;
 /** A line that leaves no identified agent session is checked once more after
@@ -85,6 +92,54 @@ interface ConnectedTerminal {
   allowIncoming: boolean;
 }
 
+const KEY_FIELD = "\u001f";
+const KEY_RECORD = "\u001e";
+
+/** Outgoing targets of `id` encoded as a primitive, so a zustand selector
+ *  can compare it by value. */
+function outgoingTargetsKey(
+  nodes: PodiumNode[],
+  edges: Edge[],
+  id: string,
+): string {
+  const records: string[] = [];
+  for (const edge of edges) {
+    if (edge.source !== id) continue;
+    const node = nodes.find((n) => n.id === edge.target);
+    if (node?.type === "terminal") {
+      records.push(
+        [
+          "t",
+          node.id,
+          node.data.label,
+          node.data.allowIncoming === true ? "1" : "0",
+        ].join(KEY_FIELD),
+      );
+    } else if (node?.type === "note") {
+      records.push(["n", node.id].join(KEY_FIELD));
+    }
+  }
+  return records.join(KEY_RECORD);
+}
+
+function parseTargetsKey(key: string): {
+  terminalTargets: ConnectedTerminal[];
+  noteTargets: string[];
+} {
+  const terminalTargets: ConnectedTerminal[] = [];
+  const noteTargets: string[] = [];
+  if (key === "") return { terminalTargets, noteTargets };
+  for (const record of key.split(KEY_RECORD)) {
+    const [kind, nodeId, label, allow] = record.split(KEY_FIELD);
+    if (kind === "t") {
+      terminalTargets.push({ id: nodeId, label, allowIncoming: allow === "1" });
+    } else {
+      noteTargets.push(nodeId);
+    }
+  }
+  return { terminalTargets, noteTargets };
+}
+
 function TerminalNodeComponent({
   id,
   data,
@@ -110,32 +165,15 @@ function TerminalNodeComponent({
   const updateNodeData = useWorkspaceStore((s) => s.updateNodeData);
   const removeNode = useWorkspaceStore((s) => s.removeNode);
 
-  // Outgoing connections drive the footer actions. Derived via useMemo —
-  // zustand selectors must return referentially stable snapshots.
-  const edges = useWorkspaceStore((s) => s.edges);
-  const nodes = useWorkspaceStore((s) => s.nodes);
-  const terminalTargets = useMemo<ConnectedTerminal[]>(
-    () =>
-      edges
-        .filter((e) => e.source === id)
-        .map((e) => nodes.find((n) => n.id === e.target))
-        .filter((n): n is TerminalFlowNode => n?.type === "terminal")
-        .map((n) => ({
-          id: n.id,
-          label: (n.data as TerminalNodeData).label,
-          allowIncoming: (n.data as TerminalNodeData).allowIncoming === true,
-        })),
-    [edges, nodes, id],
+  // Outgoing connections drive the footer actions. The selector returns a
+  // string so this node only re-renders when its own targets change, not on
+  // every drag frame of any node on the canvas.
+  const targetsKey = useWorkspaceStore((s) =>
+    outgoingTargetsKey(s.nodes, s.edges, id),
   );
-  const noteTargets = useMemo<string[]>(
-    () =>
-      edges
-        .filter((e) => e.source === id)
-        .flatMap((e) => {
-          const n = nodes.find((node) => node.id === e.target);
-          return n?.type === "note" ? [n.id] : [];
-        }),
-    [edges, nodes, id],
+  const { terminalTargets, noteTargets } = useMemo(
+    () => parseTargetsKey(targetsKey),
+    [targetsKey],
   );
 
   // Spawn-time options read via ref so renames/edits don't respawn the PTY.
@@ -157,24 +195,67 @@ function TerminalNodeComponent({
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(container);
-    try {
-      const webgl = new WebglAddon();
-      // The webview caps live WebGL contexts (~16) and drops the oldest
-      // beyond that; without this the terminal keeps a frozen frame.
-      // Disposing the addon falls back to the DOM renderer.
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
-    } catch {
-      // WebGL unavailable — DOM renderer fallback is fine.
-    }
+
+    // WebGL only while on screen and within the context budget; otherwise
+    // the DOM renderer (or nothing, off screen). Output keeps flowing either way.
+    let webgl: WebglAddon | null = null;
+    const renderer = registerRenderer(
+      id,
+      () => {
+        try {
+          const addon = new WebglAddon();
+          // A lost context leaves a frozen frame; disposing the addon falls
+          // back to the DOM renderer.
+          addon.onContextLoss(() => {
+            addon.dispose();
+            if (webgl === addon) webgl = null;
+            renderer.lost();
+          });
+          term.loadAddon(addon);
+          webgl = addon;
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      () => {
+        webgl?.dispose();
+        webgl = null;
+      },
+    );
+    const visibility = new IntersectionObserver(
+      (records) => {
+        const record = records[records.length - 1];
+        if (record) renderer.setVisible(record.isIntersecting);
+      },
+      { rootMargin: "200px" },
+    );
+    visibility.observe(container);
+    const onFocus = () => renderer.touch();
+    container.addEventListener("focusin", onFocus);
+
     fit.fit();
     termRef.current = term;
     fitRef.current = fit;
 
-    // Listeners registered before spawn so no early output is dropped.
-    const unlistenOutput = pty.onTerminalOutput(id, (bytes) => {
-      term.write(bytes);
-    });
+    let pendingBytes = 0;
+    let outputPaused = false;
+    const onOutput = (bytes: Uint8Array) => {
+      pendingBytes += bytes.length;
+      term.write(bytes, () => {
+        pendingBytes -= bytes.length;
+        if (outputPaused && pendingBytes < OUTPUT_LOW_WATER) {
+          outputPaused = false;
+          void pty.setTerminalOutputPaused(id, false).catch(() => {});
+        }
+      });
+      if (!outputPaused && pendingBytes > OUTPUT_HIGH_WATER) {
+        outputPaused = true;
+        void pty.setTerminalOutputPaused(id, true).catch(() => {});
+      }
+    };
+
+    // Exit listener registered before spawn so an early exit is not missed.
     const unlistenExit = pty.onTerminalExit(id, (code) => {
       setStatus("exited");
       term.writeln(`\r\n[process exited${code === null ? "" : ` (${code})`}]`);
@@ -191,7 +272,7 @@ function TerminalNodeComponent({
         command,
         cols: term.cols,
         rows: term.rows,
-      })
+      }, onOutput)
       .then(() => setStatus("running"))
       .catch((err: unknown) => {
         setStatus("exited");
@@ -253,6 +334,7 @@ function TerminalNodeComponent({
     container.addEventListener("paste", onPaste, true);
 
     const dataSub = term.onData((input) => {
+      renderer.touch();
       // Ignore rejections: the PTY may have already exited.
       void pty.writeToTerminal(id, input).catch(() => {});
       if (input.includes("\r")) {
@@ -269,10 +351,12 @@ function TerminalNodeComponent({
     return () => {
       clearTimeout(syncTimer);
       container.removeEventListener("paste", onPaste, true);
+      container.removeEventListener("focusin", onFocus);
       observer.disconnect();
+      visibility.disconnect();
+      renderer.dispose();
       dataSub.dispose();
       resizeSub.dispose();
-      void unlistenOutput.then((fn) => fn());
       void unlistenExit.then((fn) => fn());
       termRef.current = null;
       fitRef.current = null;

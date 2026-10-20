@@ -14,6 +14,8 @@ pub fn run() {
             pty::get_terminal_cwds,
             pty::get_terminal_agents,
             pty::kill_terminal,
+            pty::set_ui_visible,
+            pty::set_terminal_output_paused,
             workspace::save_workspace,
             workspace::load_workspace,
             settings::save_settings,

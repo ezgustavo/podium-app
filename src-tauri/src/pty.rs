@@ -10,13 +10,44 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, State};
+
+/// Output is forwarded to the webview at most once per frame while a terminal
+/// is busy; an isolated chunk after a quiet period goes out immediately so
+/// keystroke echo gets no added latency.
+const OUTPUT_FRAME: Duration = Duration::from_millis(16);
+/// Upper bound for one coalesced output message.
+const OUTPUT_MAX_BATCH: usize = 256 * 1024;
+/// Rows of history kept by the headless screen mirror.
+const SCREEN_SCROLLBACK: usize = 200;
+
+/// Message from a session's reader thread to its emitter thread.
+enum OutputMsg {
+    Data(Vec<u8>),
+    /// Replace whatever the view shows with the mirrored screen state.
+    Resync,
+}
+
+/// Headless copy of the terminal screen, fed the same bytes as the view.
+/// It survives while the webview is not consuming output (window hidden or
+/// a view falling behind), so the view can be restored from it instead of the
+/// PTY ever being paused: agents keep running at full speed regardless of
+/// what the UI is doing.
+pub type ScreenMirror = Arc<Mutex<vt100::Parser>>;
 
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    screen: ScreenMirror,
+    /// Set by the view when its write queue is backed up.
+    paused: Arc<AtomicBool>,
+    output_tx: mpsc::Sender<OutputMsg>,
     /// Last directory reported by the shell prompt hook (OSC 9;9).
     #[cfg(windows)]
     cwd: Arc<Mutex<Option<String>>>,
@@ -28,6 +59,9 @@ pub struct PtySession {
 #[derive(Default)]
 pub struct PtyManager {
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+    /// The webview is hidden (minimized / occluded): it throttles timers, so
+    /// xterm would parse output far slower than agents produce it.
+    ui_hidden: Arc<AtomicBool>,
 }
 
 /// Default shell: $SHELL on Unix; if unset, the first of bash/zsh/sh that
@@ -236,6 +270,7 @@ fn process_cwd(_pid: u32) -> Option<String> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn create_terminal(
     app: AppHandle,
     manager: State<'_, PtyManager>,
@@ -244,6 +279,7 @@ pub fn create_terminal(
     command: Option<String>,
     cols: u16,
     rows: u16,
+    on_output: Channel<Response>,
 ) -> Result<(), String> {
     {
         let sessions = manager.sessions.lock().map_err(|e| e.to_string())?;
@@ -289,6 +325,10 @@ pub fn create_terminal(
         }
     }
 
+    let screen: ScreenMirror = Arc::new(Mutex::new(new_screen(rows, cols)));
+    let paused = Arc::new(AtomicBool::new(false));
+    let (output_tx, output_rx) = mpsc::channel::<OutputMsg>();
+
     {
         let mut sessions = manager.sessions.lock().map_err(|e| e.to_string())?;
         sessions.insert(
@@ -297,12 +337,23 @@ pub fn create_terminal(
                 master: pair.master,
                 writer,
                 killer,
+                screen: Arc::clone(&screen),
+                paused: Arc::clone(&paused),
+                output_tx: output_tx.clone(),
                 #[cfg(windows)]
                 cwd: Arc::clone(&cwd_slot),
                 pid,
             },
         );
     }
+
+    let emitter = {
+        let screen = Arc::clone(&screen);
+        let ui_hidden = Arc::clone(&manager.ui_hidden);
+        std::thread::spawn(move || {
+            run_output_emitter(&output_rx, &screen, &paused, &ui_hidden, &on_output);
+        })
+    };
 
     // Dedicated reader thread per session; small reads keep latency low.
     let sessions = Arc::clone(&manager.sessions);
@@ -320,17 +371,139 @@ pub fn create_terminal(
                             *slot = Some(path);
                         }
                     }
-                    let _ = app.emit(&format!("terminal-output:{id}"), buf[..n].to_vec());
+                    // Mirror and enqueue under one lock: a resync snapshot then
+                    // covers exactly the chunks queued before it.
+                    if let Ok(mut parser) = screen.lock() {
+                        parser.process(&buf[..n]);
+                        let _ = output_tx.send(OutputMsg::Data(buf[..n].to_vec()));
+                    }
                 }
             }
         }
-        let exit_code = child.wait().ok().map(|status| status.exit_code());
+        // Dropping both senders (ours and the session's) closes the channel:
+        // the emitter flushes what is left, then the exit is announced.
+        drop(output_tx);
         if let Ok(mut sessions) = sessions.lock() {
             sessions.remove(&id);
         }
+        let _ = emitter.join();
+        let exit_code = child.wait().ok().map(|status| status.exit_code());
         let _ = app.emit(&format!("terminal-exit:{id}"), exit_code);
     });
 
+    Ok(())
+}
+
+fn new_screen(rows: u16, cols: u16) -> vt100::Parser {
+    vt100::Parser::new(
+        std::num::NonZeroU16::new(rows).unwrap_or(std::num::NonZeroU16::MIN),
+        std::num::NonZeroU16::new(cols).unwrap_or(std::num::NonZeroU16::MIN),
+        SCREEN_SCROLLBACK,
+    )
+}
+
+/// Coalesces a session's output into at most one message per frame and
+/// forwards it to the view. While the view is not consuming output (hidden
+/// window, or paused by its own backpressure) output is dropped, and the view
+/// is restored from the screen mirror once it consumes again.
+fn run_output_emitter(
+    rx: &mpsc::Receiver<OutputMsg>,
+    screen: &ScreenMirror,
+    paused: &AtomicBool,
+    ui_hidden: &AtomicBool,
+    channel: &Channel<Response>,
+) {
+    let mut last_emit = Instant::now()
+        .checked_sub(OUTPUT_FRAME)
+        .unwrap_or_else(Instant::now);
+    let mut stale = false;
+    let mut closed = false;
+    while !closed {
+        let mut batch = Vec::new();
+        let mut resync = false;
+        match rx.recv() {
+            Ok(OutputMsg::Data(chunk)) => batch = chunk,
+            Ok(OutputMsg::Resync) => resync = true,
+            Err(_) => break,
+        }
+        let deadline = last_emit + OUTPUT_FRAME;
+        while !resync && batch.len() < OUTPUT_MAX_BATCH {
+            let now = Instant::now();
+            let next = if now >= deadline {
+                rx.try_recv().map_err(|e| match e {
+                    mpsc::TryRecvError::Empty => RecvTimeoutError::Timeout,
+                    mpsc::TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+                })
+            } else {
+                rx.recv_timeout(deadline - now)
+            };
+            match next {
+                Ok(OutputMsg::Data(chunk)) => batch.extend_from_slice(&chunk),
+                Ok(OutputMsg::Resync) => resync = true,
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => closed = true,
+            }
+            if closed {
+                break;
+            }
+        }
+
+        if paused.load(Ordering::Relaxed) || ui_hidden.load(Ordering::Relaxed) {
+            stale = true;
+            continue;
+        }
+        if resync || stale {
+            let snapshot = match screen.lock() {
+                Ok(parser) => {
+                    // Everything queued so far is already part of the mirror.
+                    while rx.try_recv().is_ok() {}
+                    let mut bytes = b"\x1bc".to_vec();
+                    bytes.extend_from_slice(parser.screen().state_formatted().as_bytes());
+                    bytes
+                }
+                Err(_) => continue,
+            };
+            stale = false;
+            let _ = channel.send(Response::new(snapshot));
+        } else if !batch.is_empty() {
+            let _ = channel.send(Response::new(batch));
+        }
+        last_emit = Instant::now();
+    }
+}
+
+/// The webview reports whether it is visible. Hidden webviews throttle
+/// timers (xterm parses on them), so output is not forwarded meanwhile and
+/// every terminal is restored from its screen mirror when it shows again.
+#[tauri::command]
+pub fn set_ui_visible(manager: State<'_, PtyManager>, visible: bool) -> Result<(), String> {
+    manager.ui_hidden.store(!visible, Ordering::Relaxed);
+    if visible {
+        let sessions = manager.sessions.lock().map_err(|e| e.to_string())?;
+        for session in sessions.values() {
+            let _ = session.output_tx.send(OutputMsg::Resync);
+        }
+    }
+    Ok(())
+}
+
+/// Backpressure from a view whose xterm write queue is backed up: output is
+/// held back (the PTY keeps being drained) and the view is restored from the
+/// screen mirror when it resumes.
+#[tauri::command]
+pub fn set_terminal_output_paused(
+    manager: State<'_, PtyManager>,
+    id: String,
+    paused: bool,
+) -> Result<(), String> {
+    let sessions = manager.sessions.lock().map_err(|e| e.to_string())?;
+    let Some(session) = sessions.get(&id) else {
+        return Ok(());
+    };
+    session.paused.store(paused, Ordering::Relaxed);
+    if !paused {
+        let _ = session.output_tx.send(OutputMsg::Resync);
+    }
     Ok(())
 }
 
@@ -361,6 +534,14 @@ pub fn resize_terminal(
     let session = sessions
         .get(&id)
         .ok_or_else(|| format!("terminal '{id}' not found"))?;
+    if let Ok(mut parser) = session.screen.lock() {
+        if let (Some(r), Some(c)) = (
+            std::num::NonZeroU16::new(rows),
+            std::num::NonZeroU16::new(cols),
+        ) {
+            parser.set_size(r, c);
+        }
+    }
     session
         .master
         .resize(PtySize {
