@@ -14,6 +14,7 @@ import { useTerminalClipboard } from "./useTerminalClipboard";
 import { useCanvasNavigation } from "./useCanvasNavigation";
 import { useCrispViewport } from "./useCrispViewport";
 import { SettingsButton } from "../settings/SettingsButton";
+import { MissionPanel } from "../mission/MissionPanel";
 import { useWorkspaceStore } from "../store/workspace";
 
 const nodeTypes = { terminal: TerminalNode, note: NoteNode };
@@ -56,6 +57,7 @@ function CanvasInner() {
       <Controls />
       <Toolbar />
       <SettingsButton />
+      <MissionPanel />
     </ReactFlow>
   );
 }

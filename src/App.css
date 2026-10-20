@@ -864,3 +864,196 @@ body {
 .settings__action:hover {
   border-color: #7aa2f7;
 }
+
+/* ---- Missions ---- */
+
+.note-node__run {
+  border: 1px solid #3d3829;
+  border-radius: 4px;
+  background: #2f2a19;
+  color: #e0af68;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  margin-right: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-node__run:hover:not(:disabled) {
+  border-color: #e0af68;
+}
+
+.note-node__run:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.missions {
+  width: 320px;
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: #16181dee;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px #0006;
+}
+
+.missions__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  color: #d4d7dd;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.missions__chevron {
+  margin-left: auto;
+  color: #6b7280;
+}
+
+.missions__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #6b7280;
+}
+
+.missions__dot--live {
+  background: #9ece6a;
+}
+
+.missions__list {
+  overflow-y: auto;
+  border-top: 1px solid #2a2f3a;
+}
+
+.mission {
+  padding: 8px 10px 10px;
+}
+
+.mission + .mission {
+  border-top: 1px solid #2a2f3a;
+}
+
+.mission__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.mission__title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #d4d7dd;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission__state {
+  font-size: 10px;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mission__state--active {
+  color: #9ece6a;
+}
+
+.mission__state--preparing {
+  color: #e0af68;
+}
+
+.mission__progress {
+  height: 3px;
+  background: #2a2f3a;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.mission__progress-bar {
+  height: 100%;
+  background: #9ece6a;
+  transition: width 0.3s ease;
+}
+
+.mission__tasks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mission__task {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #aeb3bd;
+}
+
+.mission__task-id {
+  color: #6b7280;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  width: 22px;
+  flex-shrink: 0;
+}
+
+.mission__task-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission__pill {
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  color: #8b919d;
+  background: #262a33;
+}
+
+.mission__pill--running,
+.mission__pill--starting {
+  color: #7aa2f7;
+  background: #7aa2f71f;
+}
+
+.mission__pill--merging {
+  color: #bb9af7;
+  background: #bb9af71f;
+}
+
+.mission__pill--done {
+  color: #9ece6a;
+  background: #9ece6a1f;
+}
+
+.mission__pill--failed,
+.mission__pill--needsHuman {
+  color: #f7768e;
+  background: #f7768e1f;
+}

@@ -3,6 +3,7 @@ import App from "./App";
 import { loadSettings } from "./store/settings";
 import { setUiVisible } from "./lib/pty";
 import { startBridge } from "./lib/bridge";
+import { startMissionSync } from "./mission/missions";
 
 // Suppress the webview's native context menu (Reload / Inspect / AutoFill) —
 // right-click is reserved for canvas interactions.
@@ -10,6 +11,7 @@ window.addEventListener("contextmenu", (e) => e.preventDefault());
 
 void loadSettings();
 startBridge();
+startMissionSync();
 
 // E2E hooks for the dev build (driven over CDP); stripped from production.
 if (import.meta.env.DEV) {

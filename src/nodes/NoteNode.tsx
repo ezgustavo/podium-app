@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import {
   Handle,
   NodeResizer,
@@ -9,12 +9,36 @@ import type { NoteFlowNode } from "../store/workspace";
 import { useWorkspaceStore } from "../store/workspace";
 import { renderMarkdown } from "../lib/markdown";
 import { noteName } from "../lib/bridge";
+import { runNoteAsMission } from "../mission/missions";
 
 function NoteNodeComponent({ id, data, selected }: NodeProps<NoteFlowNode>) {
   const [editing, setEditing] = useState(data.text === "");
   const [renaming, setRenaming] = useState(false);
   const updateNodeData = useWorkspaceStore((s) => s.updateNodeData);
   const removeNode = useWorkspaceStore((s) => s.removeNode);
+  // Wired straight to an orchestrator: the note can be run as a mission.
+  const hasOrchestrator = useWorkspaceStore((s) =>
+    s.edges.some((e) => {
+      const other = e.source === id ? e.target : e.target === id ? e.source : null;
+      if (other === null) return false;
+      const node = s.nodes.find((n) => n.id === other);
+      return node?.type === "terminal" && node.data.orchestrator === true;
+    }),
+  );
+  const [runState, setRunState] = useState<string | null>(null);
+  const runTimer = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(runTimer.current), []);
+
+  const run = () => {
+    setRunState("…");
+    runNoteAsMission(id)
+      .then((name) => setRunState(`→ ${name}`))
+      .catch((err: unknown) => setRunState(String(err)))
+      .finally(() => {
+        clearTimeout(runTimer.current);
+        runTimer.current = setTimeout(() => setRunState(null), 2500);
+      });
+  };
 
   const commitName = (value: string) => {
     const name = value.trim();
@@ -66,6 +90,20 @@ function NoteNodeComponent({ id, data, selected }: NodeProps<NoteFlowNode>) {
           >
             {noteName(data)}
           </span>
+        )}
+        {hasOrchestrator && (
+          <button
+            className="note-node__run nodrag"
+            title="Run as mission"
+            disabled={data.text.trim() === "" || runState === "…"}
+            onClick={(e) => {
+              e.stopPropagation();
+              run();
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >
+            {runState ?? "▶ Run"}
+          </button>
         )}
         <button
           className={`note-node__lock nodrag${
