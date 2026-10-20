@@ -15,6 +15,7 @@ import type {
   TerminalNodeData,
 } from "../store/workspace";
 import { useWorkspaceStore } from "../store/workspace";
+import { useSettingsStore } from "../store/settings";
 import * as pty from "../lib/pty";
 
 type TerminalStatus = "idle" | "starting" | "running" | "exited";
@@ -40,6 +41,9 @@ const CTRL_V = "\x16";
  * clipboard. macOS already pastes with Cmd+V, so Ctrl+V still reaches the PTY.
  */
 function isPasteShortcut(e: KeyboardEvent): boolean {
+  if (!useSettingsStore.getState().settings.shortcuts.pasteWithCtrlV) {
+    return false;
+  }
   if (IS_MAC || !e.ctrlKey || e.altKey || e.metaKey || e.code !== "KeyV") {
     return false;
   }
@@ -49,6 +53,7 @@ function isPasteShortcut(e: KeyboardEvent): boolean {
 /** Ctrl+Enter / Shift+Enter insert a line break in agent prompts. */
 function isNewlineShortcut(e: KeyboardEvent): boolean {
   return (
+    useSettingsStore.getState().settings.shortcuts.newlineWithModifiedEnter &&
     e.key === "Enter" && (e.ctrlKey || e.shiftKey) && !e.altKey && !e.metaKey
   );
 }
@@ -82,6 +87,8 @@ function TerminalNodeComponent({
 }: NodeProps<TerminalFlowNode>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const fontSize = useSettingsStore((s) => s.settings.terminal.fontSize);
   const [status, setStatus] = useState<TerminalStatus>(
     data.autoStart ? "starting" : "idle",
   );
@@ -132,7 +139,7 @@ function TerminalNodeComponent({
 
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 13,
+      fontSize: useSettingsStore.getState().settings.terminal.fontSize,
       fontFamily: "'SF Mono', Menlo, Consolas, 'Courier New', monospace",
       scrollback: 5000,
       theme: TERMINAL_THEME,
@@ -152,6 +159,7 @@ function TerminalNodeComponent({
     }
     fit.fit();
     termRef.current = term;
+    fitRef.current = fit;
 
     // Listeners registered before spawn so no early output is dropped.
     const unlistenOutput = pty.onTerminalOutput(id, (bytes) => {
@@ -235,10 +243,18 @@ function TerminalNodeComponent({
       void unlistenOutput.then((fn) => fn());
       void unlistenExit.then((fn) => fn());
       termRef.current = null;
+      fitRef.current = null;
       term.dispose();
       void pty.killTerminal(id).catch(() => {});
     };
   }, [id, spawnKey]);
+
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term || term.options.fontSize === fontSize) return;
+    term.options.fontSize = fontSize;
+    fitRef.current?.fit();
+  }, [fontSize]);
 
   // Clear any pending flash timer on unmount so it never fires setState late.
   useEffect(
