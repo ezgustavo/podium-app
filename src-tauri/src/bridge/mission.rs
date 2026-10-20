@@ -1068,7 +1068,18 @@ impl Inner {
             return;
         };
         let settings = self.settings();
-        let name = format!("{}-{}", task.id, slug(&task.title, 18));
+        // Several missions may run at once: worker names stay unique on the canvas.
+        let base_name = format!("{}-{}", task.id, slug(&task.title, 18));
+        let taken: Vec<String> = self
+            .graph()
+            .terminal_names()
+            .iter()
+            .map(|n| n.to_lowercase())
+            .collect();
+        let name = std::iter::once(base_name.clone())
+            .chain((2..).map(|i| format!("{base_name}-{i}")))
+            .find(|candidate| !taken.contains(&candidate.to_lowercase()))
+            .unwrap_or(base_name);
         let result = (|| -> Result<String, String> {
             if !task.worktree.is_dir() {
                 worktree::add_worktree(&mission.repo, &task.worktree, &task.branch, &mission.integration_branch)?;
