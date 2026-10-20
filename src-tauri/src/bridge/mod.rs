@@ -43,6 +43,8 @@ const MAX_REQUEST_BYTES: u64 = 8 * 1024 * 1024;
 const UI_TIMEOUT: Duration = Duration::from_secs(30);
 /// Watchdog period: idle detection and inbox delivery.
 const TICK: Duration = Duration::from_millis(250);
+/// Startup dialogs of recruits are answered every this many ticks.
+const DIALOG_TICKS: u64 = 3;
 /// Mission scheduling and stuck detection run every this many ticks.
 const SLOW_TICKS: u64 = 8;
 /// A recruit waiting on a prompt (permission, menu) this long is reported.
@@ -181,6 +183,9 @@ impl Bridge {
                 std::thread::sleep(TICK);
                 watchdog.tick();
                 beat += 1;
+                if beat.is_multiple_of(DIALOG_TICKS) {
+                    watchdog.answer_startup_dialogs();
+                }
                 if beat.is_multiple_of(SLOW_TICKS) {
                     watchdog.stuck_tick();
                     watchdog.mission_tick();
@@ -354,7 +359,15 @@ impl Inner {
             let mut finished = Vec::new();
             for (id, entry) in &mut agents.entries {
                 let before = entry.state;
-                if let Some(next) = entry.tick(now, || pty.bracketed_paste(id)) {
+                // A startup dialog (folder trust) is not the agent's input:
+                // nothing is pasted until it is gone.
+                let ready = || {
+                    pty.bracketed_paste(id)
+                        && !pty
+                            .screen_text(id)
+                            .is_some_and(|screen| startup_dialog(&screen).is_some())
+                };
+                if let Some(next) = entry.tick(now, ready) {
                     changes.push((id.clone(), next));
                     if before == AgentState::Working && next == AgentState::Idle {
                         finished.push(id.clone());
@@ -396,6 +409,32 @@ impl Inner {
         }
         for (id, envelope) in deliveries {
             self.deliver(&id, envelope);
+        }
+    }
+
+    /// Recruits run unattended: answer the agent's folder-trust dialog the
+    /// way the user would, one keystroke per pass.
+    fn answer_startup_dialogs(&self) {
+        let graph = self.graph();
+        let starting: Vec<String> = match self.state.lock() {
+            Ok(state) => state
+                .agents
+                .entries
+                .iter()
+                .filter(|(_, e)| e.state == AgentState::Starting && e.is_agent())
+                .map(|(id, _)| id.clone())
+                .filter(|id| graph.node(id).is_some_and(|n| n.parent.is_some()))
+                .collect(),
+            Err(_) => return,
+        };
+        let pty = self.pty();
+        for id in starting {
+            let Some(screen) = pty.screen_text(&id) else {
+                continue;
+            };
+            if let Some(keys) = startup_dialog(&screen) {
+                let _ = pty.write_bytes(&id, keys.as_bytes());
+            }
         }
     }
 
@@ -551,6 +590,21 @@ impl Inner {
     }
 }
 
+/// Keys that accept a known startup dialog on `screen`, if one is showing.
+/// Claude Code asks whether to trust a new folder (every fresh worktree),
+/// with "No, exit" preselected: move to "Yes", then confirm.
+fn startup_dialog(screen: &str) -> Option<&'static str> {
+    let lower = screen.to_lowercase();
+    if !lower.contains("trust this folder") && !lower.contains("trust the files in this folder") {
+        return None;
+    }
+    let selected = screen
+        .lines()
+        .find(|line| line.trim_start().starts_with('\u{276f}') || line.trim_start().starts_with("> "))?
+        .to_lowercase();
+    Some(if selected.contains("yes") { "\r" } else { "\x1b[B" })
+}
+
 fn random_token() -> String {
     // RandomState is seeded from the OS RNG per instance; four independent
     // hashers give 256 bits without pulling in a crypto dependency.
@@ -604,6 +658,20 @@ fn dispatch(inner: &Arc<Inner>, request: Request) -> Reply {
 }
 
 /// Mirrors the frontend's canvas graph.
+#[cfg(test)]
+mod tests {
+    use super::startup_dialog;
+
+    #[test]
+    fn answers_the_trust_dialog() {
+        let no = "Accessing workspace:\n Quick safety check\n \u{276f} No, exit\n   Yes, I trust this folder\n";
+        let yes = "Accessing workspace:\n   No, exit\n \u{276f} Yes, I trust this folder\n";
+        assert_eq!(startup_dialog(no), Some("\x1b[B"));
+        assert_eq!(startup_dialog(yes), Some("\r"));
+        assert_eq!(startup_dialog("> just a prompt"), None);
+    }
+}
+
 #[tauri::command]
 pub fn bridge_sync_graph(bridge: State<'_, Bridge>, graph: GraphSnapshot) -> Result<(), String> {
     let mut state = bridge.inner.state.lock().map_err(|e| e.to_string())?;
