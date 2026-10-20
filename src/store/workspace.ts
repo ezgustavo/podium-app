@@ -26,11 +26,22 @@ export interface TerminalNodeData extends Record<string, unknown> {
   allowIncoming?: boolean;
   /** Agent CLI last seen running in this terminal, resumed on next launch. */
   agentSession?: AgentSession;
+  /** May spawn and dismiss recruits through the `podium` CLI. */
+  orchestrator?: boolean;
+  /** Orchestrator terminal that spawned this one. */
+  parent?: string;
 }
 
 export interface NoteNodeData extends Record<string, unknown> {
   text: string;
+  /** Stable name set by the user or an agent; otherwise the first line. */
+  name?: string;
+  /** Agents may read but not change the note. */
+  locked?: boolean;
 }
+
+/** Recruit terminals open smaller than user-made ones. */
+export const RECRUIT_SIZE = { width: 560, height: 340 };
 
 export type TerminalFlowNode = Node<TerminalNodeData, "terminal">;
 export type NoteFlowNode = Node<NoteNodeData, "note">;
@@ -44,7 +55,12 @@ interface WorkspaceState {
   onEdgesChange: (changes: EdgeChange[]) => void;
   onConnect: (connection: Connection) => void;
   removeEdge: (id: string) => void;
-  addTerminal: (position: XYPosition, command?: string, label?: string) => void;
+  addTerminal: (
+    position: XYPosition,
+    command?: string,
+    label?: string,
+    extra?: Partial<TerminalNodeData>,
+  ) => void;
   addNote: (position: XYPosition) => void;
   removeNode: (id: string) => void;
   updateNodeData: (
@@ -63,6 +79,16 @@ interface WorkspaceState {
   /** Spawns a plain shell the size of each source terminal in the nearest
    *  free spot around it, and selects the new terminals. */
   pasteTerminals: (sources: TerminalClip[]) => void;
+  /** Recruit terminal next to its orchestrator, wired to it. Returns its id. */
+  addRecruit: (recruit: {
+    parent: string;
+    name: string;
+    command?: string;
+    cwd?: string;
+  }) => string;
+  /** Note next to `owner`, wired to it. Returns its id. */
+  addLinkedNote: (owner: string, text: string, name?: string) => string;
+  connectNodes: (a: string, b: string) => void;
 }
 
 /** Copied terminal: its id plus its rect at copy time, used if the source
@@ -92,7 +118,17 @@ function nextLabel(nodes: PodiumNode[]): string {
   return `Terminal ${i}`;
 }
 
-export const useWorkspaceStore = create<WorkspaceState>((set) => ({
+function edgeBetween(source: string, target: string): Edge {
+  return {
+    id: `xy-edge__${source}-${target}`,
+    source,
+    target,
+    animated: true,
+    markerEnd: { type: MarkerType.ArrowClosed },
+  };
+}
+
+export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   nodes: [],
   edges: [],
   hydrated: false,
@@ -121,7 +157,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   removeEdge: (id) =>
     set((state) => ({ edges: state.edges.filter((e) => e.id !== id) })),
 
-  addTerminal: (position, command, label) =>
+  addTerminal: (position, command, label, extra) =>
     set((state) => ({
       nodes: [
         ...state.nodes,
@@ -130,6 +166,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
           type: "terminal",
           position,
           data: {
+            ...extra,
             label: label ?? nextLabel(state.nodes),
             autoStart: true,
             command,
@@ -199,6 +236,82 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       });
       return changed ? { nodes } : state;
     }),
+
+  addRecruit: ({ parent, name, command, cwd }) => {
+    const id = crypto.randomUUID();
+    set((state) => {
+      const owner = state.nodes.find((n) => n.id === parent);
+      const occupied = state.nodes.map(nodeRect);
+      const anchor: Rect = owner
+        ? { ...nodeRect(owner), ...RECRUIT_SIZE }
+        : { x: 0, y: 0, ...RECRUIT_SIZE };
+      // Recruits gather to the right of their orchestrator.
+      const position = findFreeSpot(
+        owner ? { ...anchor, x: anchor.x + nodeRect(owner).width + 40 } : anchor,
+        occupied,
+      );
+      const node: TerminalFlowNode = {
+        id,
+        type: "terminal",
+        position,
+        data: {
+          label: name,
+          autoStart: true,
+          command,
+          cwd,
+          parent,
+          allowIncoming: true,
+        },
+        dragHandle: ".terminal-node__header",
+        ...RECRUIT_SIZE,
+      };
+      return {
+        nodes: [...state.nodes, node],
+        edges: [...state.edges, edgeBetween(parent, id)],
+      };
+    });
+    return id;
+  },
+
+  addLinkedNote: (owner, text, name) => {
+    const id = crypto.randomUUID();
+    set((state) => {
+      const anchorNode = state.nodes.find((n) => n.id === owner);
+      const size = { width: 300, height: 220 };
+      const base: Rect = anchorNode
+        ? { ...nodeRect(anchorNode), ...size }
+        : { x: 0, y: 0, ...size };
+      // Notes appear to the left of the terminal that created them.
+      const position = findFreeSpot(
+        { ...base, x: base.x - size.width - 40 },
+        state.nodes.map(nodeRect),
+      );
+      const node: NoteFlowNode = {
+        id,
+        type: "note",
+        position,
+        data: { text, name },
+        dragHandle: ".note-node__header",
+        ...size,
+      };
+      return {
+        nodes: [...state.nodes, node],
+        edges: [...state.edges, edgeBetween(id, owner)],
+      };
+    });
+    return id;
+  },
+
+  connectNodes: (a, b) => {
+    const { edges } = get();
+    const exists = edges.some(
+      (e) =>
+        (e.source === a && e.target === b) ||
+        (e.source === b && e.target === a),
+    );
+    if (exists || a === b) return;
+    set((state) => ({ edges: [...state.edges, edgeBetween(a, b)] }));
+  },
 
   pasteTerminals: (sources) =>
     set((state) => {

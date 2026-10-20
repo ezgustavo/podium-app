@@ -22,7 +22,11 @@ interface SavedNode {
   cwd?: string;
   allowIncoming?: boolean;
   agentSession?: AgentSession;
+  orchestrator?: boolean;
+  parent?: string;
   text?: string;
+  name?: string;
+  locked?: boolean;
 }
 
 const AGENT_KINDS: readonly AgentKind[] = ["claude", "codex", "opencode"];
@@ -55,7 +59,8 @@ function toSaved(node: PodiumNode): SavedNode {
     height: rect.height,
   };
   if (node.type === "note") {
-    return { ...base, text: (node.data as NoteNodeData).text };
+    const note = node.data as NoteNodeData;
+    return { ...base, text: note.text, name: note.name, locked: note.locked };
   }
   const data = node.data as TerminalNodeData;
   return {
@@ -65,6 +70,8 @@ function toSaved(node: PodiumNode): SavedNode {
     cwd: data.cwd,
     allowIncoming: data.allowIncoming,
     agentSession: data.agentSession,
+    orchestrator: data.orchestrator,
+    parent: data.parent,
   };
 }
 
@@ -81,7 +88,11 @@ function fromSaved(saved: SavedNode): PodiumNode {
       ...common,
       type: "note",
       dragHandle: ".note-node__header",
-      data: { text: saved.text ?? "" },
+      data: {
+        text: saved.text ?? "",
+        name: typeof saved.name === "string" ? saved.name : undefined,
+        locked: saved.locked === true,
+      },
     };
   }
   return {
@@ -94,6 +105,8 @@ function fromSaved(saved: SavedNode): PodiumNode {
       cwd: saved.cwd,
       allowIncoming: saved.allowIncoming,
       agentSession: parseAgentSession(saved.agentSession),
+      orchestrator: saved.orchestrator === true,
+      parent: typeof saved.parent === "string" ? saved.parent : undefined,
       // Restored terminals start from their overlay or the launch queue.
       autoStart: false,
     },

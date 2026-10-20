@@ -15,7 +15,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::ipc::{Channel, Response};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Output is forwarded to the webview at most once per frame while a terminal
 /// is busy; an isolated chunk after a quiet period goes out immediately so
@@ -113,6 +113,18 @@ const PROMPT_HOOK: &str = concat!(
     "    $osc = [char]27 + ']9;9;' + $PWD.ProviderPath + [char]7\n",
     "  }\n",
     "  $osc + (& $global:__podiumPrompt)\n",
+    "}\n",
+    // Agents started by hand still report to Podium: Claude Code gets the
+    // hooks settings file, Codex its notify program.
+    "function global:claude {\n",
+    "  $c = Get-Command -Name claude -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1\n",
+    "  if (-not $c) { Write-Error 'claude: command not found'; return }\n",
+    "  if ($env:PODIUM_CLAUDE_SETTINGS -and -not ($args -contains '--settings')) { & $c.Source --settings $env:PODIUM_CLAUDE_SETTINGS @args } else { & $c.Source @args }\n",
+    "}\n",
+    "function global:codex {\n",
+    "  $c = Get-Command -Name codex -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1\n",
+    "  if (-not $c) { Write-Error 'codex: command not found'; return }\n",
+    "  if ($env:PODIUM_PORT) { & $c.Source -c \"notify=['podium','hook','codex-notify']\" @args } else { & $c.Source @args }\n",
     "}\n",
 );
 
@@ -274,6 +286,7 @@ fn process_cwd(_pid: u32) -> Option<String> {
 pub fn create_terminal(
     app: AppHandle,
     manager: State<'_, PtyManager>,
+    bridge: State<'_, crate::bridge::Bridge>,
     id: String,
     cwd: Option<String>,
     command: Option<String>,
@@ -300,6 +313,10 @@ pub fn create_terminal(
 
     let mut cmd = shell_command();
     cmd.env("TERM", "xterm-256color");
+    let (bridge_env, activity) = bridge.register_terminal(&id);
+    for (key, value) in bridge_env {
+        cmd.env(key, value);
+    }
     // A saved directory may have been removed since; fall back to the default.
     if let Some(dir) = cwd.filter(|d| std::path::Path::new(d).is_dir()) {
         cmd.cwd(dir);
@@ -365,8 +382,10 @@ pub fn create_terminal(
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    activity.output();
                     #[cfg(windows)]
                     if let Some(path) = scanner.feed(&buf[..n]) {
+                        activity.prompt();
                         if let Ok(mut slot) = cwd_slot.lock() {
                             *slot = Some(path);
                         }
@@ -387,6 +406,7 @@ pub fn create_terminal(
             sessions.remove(&id);
         }
         let _ = emitter.join();
+        app.state::<crate::bridge::Bridge>().unregister_terminal(&id);
         let exit_code = child.wait().ok().map(|status| status.exit_code());
         let _ = app.emit(&format!("terminal-exit:{id}"), exit_code);
     });
@@ -1638,6 +1658,79 @@ pub fn kill_terminal(manager: State<'_, PtyManager>, id: String) -> Result<(), S
         session.killer.kill().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+
+
+/// Physical memory currently available to new processes, in MB.
+#[cfg(windows)]
+pub fn free_memory_mb() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: MEMORYSTATUSEX is plain data; all-zero is a valid value.
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = u32::try_from(std::mem::size_of::<MEMORYSTATUSEX>()).ok()?;
+    // SAFETY: `status` is a properly sized MEMORYSTATUSEX with dwLength set.
+    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+    (ok != 0).then_some(status.ullAvailPhys / (1024 * 1024))
+}
+
+#[cfg(target_os = "linux")]
+pub fn free_memory_mb() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemAvailable:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+        .map(|kb| kb / 1024)
+}
+
+/// macOS counts compressed and purgeable pages in ways that make a single
+/// "available" figure misleading; the memory gate is skipped there.
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn free_memory_mb() -> Option<u64> {
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Access for the agent bridge
+// ---------------------------------------------------------------------------
+
+impl PtyManager {
+    /// Writes raw bytes into a terminal's PTY stdin.
+    pub fn write_bytes(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
+        let session = sessions
+            .get_mut(id)
+            .ok_or_else(|| format!("terminal '{id}' is not running"))?;
+        session.writer.write_all(bytes).map_err(|e| e.to_string())?;
+        session.writer.flush().map_err(|e| e.to_string())
+    }
+
+    fn with_screen<T>(&self, id: &str, f: impl FnOnce(&vt100::Screen) -> T) -> Option<T> {
+        let screen = {
+            let sessions = self.sessions.lock().ok()?;
+            Arc::clone(&sessions.get(id)?.screen)
+        };
+        let parser = screen.lock().ok()?;
+        Some(f(parser.screen()))
+    }
+
+    /// Visible screen text, trailing blank lines removed.
+    pub fn screen_text(&self, id: &str) -> Option<String> {
+        self.with_screen(id, |screen| {
+            let text = screen.contents();
+            let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+            let end = lines.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
+            lines[..end].join("
+")
+        })
+    }
+
+    /// Whether the program in the terminal enabled bracketed paste.
+    pub fn bracketed_paste(&self, id: &str) -> bool {
+        self.with_screen(id, vt100::Screen::bracketed_paste)
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]

@@ -3,17 +3,41 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type ResumeMode = "manual" | "auto";
 
+export type Autonomy = "full" | "edits" | "ask";
+export type AgentName = "claude" | "codex" | "opencode" | "shell";
+
+export interface OrchestrationSettings {
+  autonomy: Autonomy;
+  maxRecruits: number;
+  minFreeMemoryMb: number;
+  defaultAgent: AgentName;
+  stuckMinutes: number;
+  guardGit: boolean;
+}
+
 export interface PodiumSettings {
   sessions: { restoreAgentSessions: boolean; resumeMode: ResumeMode };
   terminal: { fontSize: number };
   shortcuts: { pasteWithCtrlV: boolean; newlineWithModifiedEnter: boolean };
+  orchestration: OrchestrationSettings;
 }
 
 export const DEFAULT_SETTINGS: PodiumSettings = {
   sessions: { restoreAgentSessions: true, resumeMode: "manual" },
   terminal: { fontSize: 13 },
   shortcuts: { pasteWithCtrlV: true, newlineWithModifiedEnter: true },
+  orchestration: {
+    autonomy: "full",
+    maxRecruits: 6,
+    minFreeMemoryMb: 1500,
+    defaultAgent: "claude",
+    stuckMinutes: 15,
+    guardGit: true,
+  },
 };
+
+export const AGENT_NAMES: readonly AgentName[] = ["claude", "codex", "opencode", "shell"];
+const AUTONOMY_LEVELS: readonly Autonomy[] = ["full", "edits", "ask"];
 
 export const FONT_SIZE_MIN = 10;
 export const FONT_SIZE_MAX = 20;
@@ -60,6 +84,18 @@ function readBoolean(
   return typeof value === "boolean" ? value : fallback;
 }
 
+function readNumber(
+  source: Record<string, unknown>,
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const value = source[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
 function readCategory(
   root: Record<string, unknown>,
   key: keyof PodiumSettings,
@@ -75,7 +111,10 @@ function parseSettings(raw: unknown): PodiumSettings {
   const sessions = readCategory(root, "sessions");
   const terminal = readCategory(root, "terminal");
   const shortcuts = readCategory(root, "shortcuts");
+  const orchestration = readCategory(root, "orchestration");
   const defaults = DEFAULT_SETTINGS;
+  const autonomy = orchestration.autonomy;
+  const defaultAgent = orchestration.defaultAgent;
 
   const resumeMode = sessions.resumeMode;
   const fontSize = terminal.fontSize;
@@ -108,6 +147,40 @@ function parseSettings(raw: unknown): PodiumSettings {
         shortcuts,
         "newlineWithModifiedEnter",
         defaults.shortcuts.newlineWithModifiedEnter,
+      ),
+    },
+    orchestration: {
+      autonomy: AUTONOMY_LEVELS.includes(autonomy as Autonomy)
+        ? (autonomy as Autonomy)
+        : defaults.orchestration.autonomy,
+      maxRecruits: readNumber(
+        orchestration,
+        "maxRecruits",
+        defaults.orchestration.maxRecruits,
+        1,
+        12,
+      ),
+      minFreeMemoryMb: readNumber(
+        orchestration,
+        "minFreeMemoryMb",
+        defaults.orchestration.minFreeMemoryMb,
+        0,
+        65536,
+      ),
+      defaultAgent: AGENT_NAMES.includes(defaultAgent as AgentName)
+        ? (defaultAgent as AgentName)
+        : defaults.orchestration.defaultAgent,
+      stuckMinutes: readNumber(
+        orchestration,
+        "stuckMinutes",
+        defaults.orchestration.stuckMinutes,
+        2,
+        240,
+      ),
+      guardGit: readBoolean(
+        orchestration,
+        "guardGit",
+        defaults.orchestration.guardGit,
       ),
     },
   };
