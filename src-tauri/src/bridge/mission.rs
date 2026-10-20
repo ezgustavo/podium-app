@@ -1032,9 +1032,10 @@ impl Inner {
                         }
                     }
                 }
+                // Tasks added but not yet run are not settled: the plan is
+                // still being written.
                 let all_settled = !mission.tasks.is_empty()
-                    && mission.tasks.iter().all(|t| t.status.settled() || t.status == TaskStatus::Pending)
-                    && !mission.tasks.iter().any(|t| t.status == TaskStatus::Pending && mission.auto);
+                    && mission.tasks.iter().all(|t| t.status.settled());
                 if all_settled && !mission.completion_reported {
                     mission.completion_reported = true;
                     completions.push((mission.orchestrator.clone(), describe_completion(mission)));
