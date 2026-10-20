@@ -11,14 +11,28 @@ import {
   clampFontSize,
   useSettingsStore,
 } from "../store/settings";
-import type { ResumeMode } from "../store/settings";
+import type { AgentName, Autonomy, ResumeMode } from "../store/settings";
+import { installAgentSkills } from "../lib/bridge";
 
-type CategoryId = "sessions" | "terminal" | "shortcuts";
+type CategoryId = "sessions" | "terminal" | "shortcuts" | "orchestration";
 
 const CATEGORIES: { id: CategoryId; label: string }[] = [
   { id: "sessions", label: "Sessions" },
   { id: "terminal", label: "Terminal" },
   { id: "shortcuts", label: "Shortcuts" },
+  { id: "orchestration", label: "Orchestration" },
+];
+
+const AUTONOMY_OPTIONS: { value: Autonomy; label: string }[] = [
+  { value: "full", label: "Full" },
+  { value: "edits", label: "Edits" },
+  { value: "ask", label: "Ask" },
+];
+
+const AGENT_OPTIONS: { value: AgentName; label: string }[] = [
+  { value: "claude", label: "Claude" },
+  { value: "codex", label: "Codex" },
+  { value: "opencode", label: "OpenCode" },
 ];
 
 const RESUME_OPTIONS: { value: ResumeMode; label: string }[] = [
@@ -72,6 +86,165 @@ function Toggle({
         <span className="settings__switch-thumb" />
       </button>
     </Row>
+  );
+}
+
+function Segmented<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (value: T) => void;
+}) {
+  const labelId = useId();
+  return (
+    <Row label={label} labelId={labelId}>
+      <div
+        role="radiogroup"
+        aria-labelledby={labelId}
+        className="settings__segmented"
+      >
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={value === option.value}
+            className="settings__segment"
+            onClick={() => onChange(option.value)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </Row>
+  );
+}
+
+function Stepper({
+  label,
+  value,
+  step,
+  min,
+  max,
+  format,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  step: number;
+  min: number;
+  max: number;
+  format?: (value: number) => string;
+  onChange: (value: number) => void;
+}) {
+  const labelId = useId();
+  return (
+    <Row label={label} labelId={labelId}>
+      <div
+        role="group"
+        aria-labelledby={labelId}
+        className="settings__stepper"
+      >
+        <button
+          type="button"
+          className="settings__step"
+          aria-label={`Decrease ${label}`}
+          disabled={value <= min}
+          onClick={() => onChange(Math.max(min, value - step))}
+        >
+          −
+        </button>
+        <span className="settings__step-value" aria-live="polite">
+          {format ? format(value) : value}
+        </span>
+        <button
+          type="button"
+          className="settings__step"
+          aria-label={`Increase ${label}`}
+          disabled={value >= max}
+          onClick={() => onChange(Math.min(max, value + step))}
+        >
+          +
+        </button>
+      </div>
+    </Row>
+  );
+}
+
+function OrchestrationSection() {
+  const o = useSettingsStore((s) => s.settings.orchestration);
+  const update = useSettingsStore((s) => s.update);
+  const [skills, setSkills] = useState<string | null>(null);
+  const skillsLabelId = useId();
+
+  return (
+    <>
+      <Segmented
+        label="Recruit autonomy"
+        value={o.autonomy}
+        options={AUTONOMY_OPTIONS}
+        onChange={(autonomy) => update("orchestration", { autonomy })}
+      />
+      <Segmented
+        label="Default recruit"
+        value={o.defaultAgent}
+        options={AGENT_OPTIONS}
+        onChange={(defaultAgent) => update("orchestration", { defaultAgent })}
+      />
+      <Stepper
+        label="Max recruits"
+        value={o.maxRecruits}
+        step={1}
+        min={1}
+        max={12}
+        onChange={(maxRecruits) => update("orchestration", { maxRecruits })}
+      />
+      <Stepper
+        label="Free memory floor"
+        value={o.minFreeMemoryMb}
+        step={250}
+        min={0}
+        max={16000}
+        format={(mb) => (mb >= 1000 ? `${(mb / 1000).toFixed(2)} GB` : `${mb} MB`)}
+        onChange={(minFreeMemoryMb) =>
+          update("orchestration", { minFreeMemoryMb })
+        }
+      />
+      <Stepper
+        label="Report stuck after"
+        value={o.stuckMinutes}
+        step={5}
+        min={5}
+        max={240}
+        format={(m) => `${m} min`}
+        onChange={(stuckMinutes) => update("orchestration", { stuckMinutes })}
+      />
+      <Toggle
+        label="Block git push and PRs for recruits"
+        checked={o.guardGit}
+        onChange={(guardGit) => update("orchestration", { guardGit })}
+      />
+      <Row label="Agent skills" labelId={skillsLabelId}>
+        <button
+          type="button"
+          className="settings__action"
+          aria-labelledby={skillsLabelId}
+          onClick={() => {
+            setSkills("…");
+            void installAgentSkills()
+              .then(() => setSkills("Installed"))
+              .catch((err: unknown) => setSkills(String(err)));
+          }}
+        >
+          {skills ?? "Install"}
+        </button>
+      </Row>
+    </>
   );
 }
 
@@ -188,6 +361,7 @@ const SECTIONS: Record<CategoryId, FunctionComponent> = {
   sessions: SessionsSection,
   terminal: TerminalSection,
   shortcuts: ShortcutsSection,
+  orchestration: OrchestrationSection,
 };
 
 export function SettingsDialog({ onClose }: { onClose: () => void }) {

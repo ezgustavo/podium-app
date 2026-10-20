@@ -771,3 +771,96 @@ body {
     transition: none;
   }
 }
+
+/* ---- Orchestration ---- */
+
+.terminal-node__crown {
+  border: none;
+  background: transparent;
+  color: #4b5160;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.terminal-node__crown--on {
+  color: #e0af68;
+}
+
+.terminal-node--orchestrator {
+  box-shadow: 0 0 0 1px #e0af6855;
+}
+
+.terminal-node--recruit .terminal-node__header {
+  background: #1b1f2a;
+}
+
+.terminal-node__agent {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.terminal-node__agent--working {
+  color: #7aa2f7;
+  background: #7aa2f71f;
+}
+
+.terminal-node__agent--waitingInput {
+  color: #e0af68;
+  background: #e0af6826;
+}
+
+.note-node__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.note-node__name-input {
+  flex: 1;
+  min-width: 0;
+  margin-right: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #e0af68;
+  background: #1f1c11;
+  border: 1px solid #3d3829;
+  border-radius: 4px;
+  padding: 1px 4px;
+  outline: none;
+}
+
+.note-node__lock {
+  border: none;
+  background: transparent;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.45;
+  margin-right: 4px;
+}
+
+.note-node__lock--on {
+  opacity: 1;
+}
+
+.settings__action {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid #2f3442;
+  border-radius: 5px;
+  background: #1f232c;
+  color: #d4d7dd;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings__action:hover {
+  border-color: #7aa2f7;
+}

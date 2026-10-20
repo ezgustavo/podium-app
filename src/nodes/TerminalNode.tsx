@@ -21,8 +21,15 @@ import * as pty from "../lib/pty";
 import { resumeCommand } from "../lib/agents";
 import { enqueueLaunch } from "../lib/launchQueue";
 import { registerRenderer } from "../lib/webglBudget";
+import { reportSpawned, useAgentStates, type AgentState } from "../lib/bridge";
 
 type TerminalStatus = "idle" | "starting" | "running" | "exited";
+
+/** Agent states worth a badge in the header. */
+const AGENT_BADGES: Partial<Record<AgentState, string>> = {
+  working: "working",
+  waitingInput: "needs input",
+};
 
 const TERMINAL_THEME = {
   background: "#16181d",
@@ -164,6 +171,9 @@ function TerminalNodeComponent({
   const flashTimer = useRef<ReturnType<typeof setTimeout>>();
   const updateNodeData = useWorkspaceStore((s) => s.updateNodeData);
   const removeNode = useWorkspaceStore((s) => s.removeNode);
+  const agentState = useAgentStates((s) => s[id]);
+  const badge =
+    status === "running" && agentState ? AGENT_BADGES[agentState] : undefined;
 
   // Outgoing connections drive the footer actions. The selector returns a
   // string so this node only re-renders when its own targets change, not on
@@ -273,10 +283,14 @@ function TerminalNodeComponent({
         cols: term.cols,
         rows: term.rows,
       }, onOutput)
-      .then(() => setStatus("running"))
+      .then(() => {
+        setStatus("running");
+        reportSpawned(id);
+      })
       .catch((err: unknown) => {
         setStatus("exited");
         term.writeln(`Failed to start terminal: ${String(err)}`);
+        reportSpawned(id, String(err));
       });
 
     // The directory and the running agent can only change after a submitted
@@ -495,7 +509,11 @@ function TerminalNodeComponent({
   const delegateTargets = terminalTargets.filter((t) => t.allowIncoming);
 
   return (
-    <div className="terminal-node">
+    <div
+      className={`terminal-node${data.parent ? " terminal-node--recruit" : ""}${
+        data.orchestrator ? " terminal-node--orchestrator" : ""
+      }`}
+    >
       <NodeResizer
         isVisible={selected}
         minWidth={360}
@@ -547,11 +565,31 @@ function TerminalNodeComponent({
             {data.label}
           </span>
         )}
+        {badge && (
+          <span
+            className={`terminal-node__agent terminal-node__agent--${agentState}`}
+          >
+            {badge}
+          </span>
+        )}
         <span className="terminal-node__command">
           {(restoreAgentSessions ? data.agentSession?.kind : undefined) ??
             data.command ??
             "shell"}
         </span>
+        <button
+          className={`terminal-node__crown nodrag ${
+            data.orchestrator ? "terminal-node__crown--on" : ""
+          }`}
+          title={data.orchestrator ? "Orchestrator: on" : "Orchestrator: off"}
+          aria-pressed={data.orchestrator === true}
+          onClick={(e) => {
+            e.stopPropagation();
+            updateNodeData(id, { orchestrator: !data.orchestrator });
+          }}
+        >
+          ♛
+        </button>
         <button
           className={`terminal-node__lock nodrag ${
             data.allowIncoming ? "terminal-node__lock--open" : ""
