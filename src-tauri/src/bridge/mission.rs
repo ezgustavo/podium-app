@@ -710,6 +710,10 @@ impl Inner {
         }
         if finish {
             let _ = worktree::remove_worktree(&mission.repo, &mission.integration_dir, None);
+            // The mission folder only held worktrees; drop it once empty.
+            if let Some(root) = mission.integration_dir.parent() {
+                let _ = std::fs::remove_dir(root);
+            }
         }
         let (done, total) = mission.counts();
         Ok(format!(
