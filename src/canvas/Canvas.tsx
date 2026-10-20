@@ -13,6 +13,7 @@ import { Toolbar } from "./Toolbar";
 import { useTerminalClipboard } from "./useTerminalClipboard";
 import { useCanvasNavigation } from "./useCanvasNavigation";
 import { useCrispViewport } from "./useCrispViewport";
+import { SettingsButton } from "../settings/SettingsButton";
 import { useWorkspaceStore } from "../store/workspace";
 
 const nodeTypes = { terminal: TerminalNode, note: NoteNode };
@@ -54,6 +55,7 @@ function CanvasInner() {
       <Background variant={BackgroundVariant.Dots} gap={24} size={1.5} />
       <Controls />
       <Toolbar />
+      <SettingsButton />
     </ReactFlow>
   );
 }
