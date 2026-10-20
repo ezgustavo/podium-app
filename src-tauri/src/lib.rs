@@ -12,6 +12,7 @@ pub fn run() {
             pty::write_to_terminal,
             pty::resize_terminal,
             pty::get_terminal_cwds,
+            pty::get_terminal_agents,
             pty::kill_terminal,
             workspace::save_workspace,
             workspace::load_workspace,
