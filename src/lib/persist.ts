@@ -6,6 +6,7 @@ import {
   type PodiumNode,
   type TerminalNodeData,
 } from "../store/workspace";
+import type { AgentKind, AgentSession } from "./pty";
 
 const WORKSPACE_NAME = "default";
 
@@ -20,7 +21,21 @@ interface SavedNode {
   command?: string;
   cwd?: string;
   allowIncoming?: boolean;
+  agentSession?: AgentSession;
   text?: string;
+}
+
+const AGENT_KINDS: readonly AgentKind[] = ["claude", "codex", "opencode"];
+
+/** The file is user-editable; anything malformed is dropped. */
+function parseAgentSession(raw: unknown): AgentSession | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const { kind, sessionId } = raw as Record<string, unknown>;
+  if (!AGENT_KINDS.includes(kind as AgentKind)) return undefined;
+  return {
+    kind: kind as AgentKind,
+    sessionId: typeof sessionId === "string" ? sessionId : null,
+  };
 }
 
 interface SavedWorkspace {
@@ -49,6 +64,7 @@ function toSaved(node: PodiumNode): SavedNode {
     command: data.command,
     cwd: data.cwd,
     allowIncoming: data.allowIncoming,
+    agentSession: data.agentSession,
   };
 }
 
@@ -77,7 +93,8 @@ function fromSaved(saved: SavedNode): PodiumNode {
       command: saved.command,
       cwd: saved.cwd,
       allowIncoming: saved.allowIncoming,
-      // Restored terminals must never auto-run their command.
+      agentSession: parseAgentSession(saved.agentSession),
+      // Restored terminals start from their overlay or the launch queue.
       autoStart: false,
     },
   };

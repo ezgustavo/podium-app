@@ -3,7 +3,8 @@ import { Canvas } from "./canvas/Canvas";
 import { useWorkspaceStore, type PodiumNode } from "./store/workspace";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { loadWorkspace, saveWorkspace } from "./lib/persist";
-import { getTerminalCwds } from "./lib/pty";
+import { getTerminalAgents, getTerminalCwds } from "./lib/pty";
+import { useSettingsStore } from "./store/settings";
 import "./App.css";
 
 const CLOSE_SAVE_TIMEOUT_MS = 2000;
@@ -67,7 +68,14 @@ function App() {
         .map((n) => n.id);
       const save = (async () => {
         if (ids.length > 0) {
-          state.applyTerminalCwds(await getTerminalCwds(ids));
+          const captureAgents =
+            useSettingsStore.getState().settings.sessions.restoreAgentSessions;
+          const [cwds, agents] = await Promise.all([
+            getTerminalCwds(ids),
+            captureAgents ? getTerminalAgents(ids) : null,
+          ]);
+          state.applyTerminalCwds(cwds);
+          if (agents) state.applyTerminalAgents(ids, agents);
         }
         clearTimeout(timer);
         dirty = false;

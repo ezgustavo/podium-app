@@ -137,11 +137,6 @@ body {
   color: #16181d;
 }
 
-.terminal-node__overlay-hint {
-  font-size: 11px;
-  color: #6b7280;
-}
-
 .terminal-node__label-input {
   font-size: 12px;
   font-weight: 600;

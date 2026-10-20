@@ -12,6 +12,8 @@ import {
   type XYPosition,
 } from "@xyflow/react";
 import { findFreeSpot, type Rect } from "../canvas/placement";
+import { sameAgentSession } from "../lib/agents";
+import type { AgentSession } from "../lib/pty";
 
 export interface TerminalNodeData extends Record<string, unknown> {
   label: string;
@@ -22,6 +24,8 @@ export interface TerminalNodeData extends Record<string, unknown> {
   autoStart: boolean;
   /** Opt-in: connected agents may write handoff prompts into this terminal. */
   allowIncoming?: boolean;
+  /** Agent CLI last seen running in this terminal, resumed on next launch. */
+  agentSession?: AgentSession;
 }
 
 export interface NoteNodeData extends Record<string, unknown> {
@@ -50,6 +54,12 @@ interface WorkspaceState {
   setWorkspace: (nodes: PodiumNode[], edges: Edge[]) => void;
   /** Applies shell directories by terminal id; no-op when nothing changed. */
   applyTerminalCwds: (cwds: Record<string, string>) => void;
+  /** Records the agent running in each queried terminal; a queried id absent
+   *  from `agents` has no agent anymore. No-op when nothing changed. */
+  applyTerminalAgents: (
+    ids: string[],
+    agents: Record<string, AgentSession>,
+  ) => void;
   /** Spawns a plain shell the size of each source terminal in the nearest
    *  free spot around it, and selects the new terminals. */
   pasteTerminals: (sources: TerminalClip[]) => void;
@@ -172,6 +182,20 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
         }
         changed = true;
         return { ...n, data: { ...n.data, cwd } };
+      });
+      return changed ? { nodes } : state;
+    }),
+
+  applyTerminalAgents: (ids, agents) =>
+    set((state) => {
+      const queried = new Set(ids);
+      let changed = false;
+      const nodes = state.nodes.map((n) => {
+        if (n.type !== "terminal" || !queried.has(n.id)) return n;
+        const agentSession = agents[n.id];
+        if (sameAgentSession(n.data.agentSession, agentSession)) return n;
+        changed = true;
+        return { ...n, data: { ...n.data, agentSession } };
       });
       return changed ? { nodes } : state;
     }),

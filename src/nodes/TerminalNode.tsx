@@ -17,6 +17,8 @@ import type {
 import { useWorkspaceStore } from "../store/workspace";
 import { useSettingsStore } from "../store/settings";
 import * as pty from "../lib/pty";
+import { resumeCommand } from "../lib/agents";
+import { enqueueLaunch } from "../lib/launchQueue";
 
 type TerminalStatus = "idle" | "starting" | "running" | "exited";
 
@@ -30,6 +32,9 @@ const TERMINAL_THEME = {
 const CAPTURE_LINES = 20;
 /** Gives the shell time to run the submitted line and redraw its prompt. */
 const CWD_SYNC_DELAY_MS = 500;
+/** A line that leaves no identified agent session is checked once more after
+ *  this, as agents boot and register their session after the Enter. */
+const AGENT_RESYNC_DELAY_MS = 4000;
 
 const IS_MAC = navigator.userAgent.includes("Mac");
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
@@ -88,7 +93,12 @@ function TerminalNodeComponent({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  /** Command for the next spawn only (e.g. resuming an agent session). */
+  const launchCommandRef = useRef<string | undefined>(undefined);
   const fontSize = useSettingsStore((s) => s.settings.terminal.fontSize);
+  const restoreAgentSessions = useSettingsStore(
+    (s) => s.settings.sessions.restoreAgentSessions,
+  );
   const [status, setStatus] = useState<TerminalStatus>(
     data.autoStart ? "starting" : "idle",
   );
@@ -170,11 +180,15 @@ function TerminalNodeComponent({
       term.writeln(`\r\n[process exited${code === null ? "" : ` (${code})`}]`);
     });
 
+    // A resume command applies to this spawn only; restarts run the
+    // terminal's own command again.
+    const command = launchCommandRef.current ?? dataRef.current.command;
+    launchCommandRef.current = undefined;
     pty
       .createTerminal({
         id,
         cwd: dataRef.current.cwd,
-        command: dataRef.current.command,
+        command,
         cols: term.cols,
         rows: term.rows,
       })
@@ -184,13 +198,31 @@ function TerminalNodeComponent({
         term.writeln(`Failed to start terminal: ${String(err)}`);
       });
 
-    // The directory can only change after a submitted line (e.g. `cd`), so it
-    // is read once shortly after Enter instead of polled.
-    let cwdTimer: ReturnType<typeof setTimeout> | undefined;
-    const syncCwd = () => {
+    // The directory and the running agent can only change after a submitted
+    // line (`cd`, `claude`, `/exit`...), so they are read once shortly after
+    // Enter instead of polled.
+    let syncTimer: ReturnType<typeof setTimeout> | undefined;
+    const syncState = (allowResync: boolean) => {
       void pty
         .getTerminalCwds([id])
         .then((cwds) => useWorkspaceStore.getState().applyTerminalCwds(cwds))
+        .catch(() => {});
+      if (!useSettingsStore.getState().settings.sessions.restoreAgentSessions) {
+        return;
+      }
+      void pty
+        .getTerminalAgents([id])
+        .then((agents) => {
+          useWorkspaceStore.getState().applyTerminalAgents([id], agents);
+          // The agent may still be booting, or not yet have registered its
+          // session: look once more a little later.
+          if (allowResync && (agents[id]?.sessionId ?? null) === null) {
+            syncTimer = setTimeout(
+              () => syncState(false),
+              AGENT_RESYNC_DELAY_MS,
+            );
+          }
+        })
         .catch(() => {});
     };
 
@@ -224,8 +256,8 @@ function TerminalNodeComponent({
       // Ignore rejections: the PTY may have already exited.
       void pty.writeToTerminal(id, input).catch(() => {});
       if (input.includes("\r")) {
-        clearTimeout(cwdTimer);
-        cwdTimer = setTimeout(syncCwd, CWD_SYNC_DELAY_MS);
+        clearTimeout(syncTimer);
+        syncTimer = setTimeout(() => syncState(true), CWD_SYNC_DELAY_MS);
       }
     });
     const resizeSub = term.onResize(({ cols, rows }) => {
@@ -235,7 +267,7 @@ function TerminalNodeComponent({
     observer.observe(container);
 
     return () => {
-      clearTimeout(cwdTimer);
+      clearTimeout(syncTimer);
       container.removeEventListener("paste", onPaste, true);
       observer.disconnect();
       dataSub.dispose();
@@ -264,10 +296,48 @@ function TerminalNodeComponent({
     [],
   );
 
+  // Only the first start of a restored terminal resumes its agent session.
+  const resumeSession =
+    spawnKey === 0 && restoreAgentSessions ? data.agentSession : undefined;
+  const startedRef = useRef(data.autoStart);
+
   const start = () => {
+    startedRef.current = true;
+    if (resumeSession) launchCommandRef.current = resumeCommand(resumeSession);
     setStatus("starting");
     setSpawnKey((k) => k + 1);
   };
+  const startRef = useRef(start);
+  startRef.current = start;
+
+  // Automatic resume: restored terminals go through the launch queue once
+  // settings are known, instead of all spawning on the first frame.
+  useEffect(() => {
+    if (startedRef.current) return;
+    let cancelLaunch: (() => void) | undefined;
+    const schedule = () => {
+      const { sessions } = useSettingsStore.getState().settings;
+      if (sessions.resumeMode !== "auto" || !sessions.restoreAgentSessions) {
+        return;
+      }
+      cancelLaunch = enqueueLaunch(dataRef.current.agentSession !== undefined, () => {
+        if (!startedRef.current) startRef.current();
+      });
+    };
+    if (useSettingsStore.getState().loaded) {
+      schedule();
+      return () => cancelLaunch?.();
+    }
+    const unsubscribe = useSettingsStore.subscribe((state) => {
+      if (!state.loaded) return;
+      unsubscribe();
+      schedule();
+    });
+    return () => {
+      unsubscribe();
+      cancelLaunch?.();
+    };
+  }, []);
 
   const commitLabel = (value: string) => {
     updateNodeData(id, {
@@ -394,7 +464,9 @@ function TerminalNodeComponent({
           </span>
         )}
         <span className="terminal-node__command">
-          {data.command ?? "shell"}
+          {(restoreAgentSessions ? data.agentSession?.kind : undefined) ??
+            data.command ??
+            "shell"}
         </span>
         <button
           className={`terminal-node__lock nodrag ${
@@ -431,15 +503,12 @@ function TerminalNodeComponent({
         {(status === "idle" || (status === "exited" && spawnKey > 0)) && (
           <div className="terminal-node__overlay nodrag">
             <button className="terminal-node__start" onClick={start}>
-              {status === "idle"
-                ? `▶ Start ${data.command ?? "shell"}`
-                : "↻ Restart"}
+              {status !== "idle"
+                ? "↻ Restart"
+                : resumeSession
+                  ? `▶ Resume ${resumeSession.kind}`
+                  : `▶ Start ${data.command ?? "shell"}`}
             </button>
-            {status === "idle" && (
-              <p className="terminal-node__overlay-hint">
-                Restored terminals never auto-run
-              </p>
-            )}
           </div>
         )}
         {flash && <div className="terminal-node__flash">{flash}</div>}

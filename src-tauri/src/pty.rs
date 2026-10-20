@@ -1417,8 +1417,9 @@ fn detect_agent<S: ProcessSource>(
 
 /// Agent CLI (Claude Code, Codex, OpenCode) running in each terminal's shell,
 /// keyed by terminal id; terminals without one are omitted. Queried on
-/// demand (after a submitted line and on window close), never polled.
-#[tauri::command]
+/// demand (after a submitted line and on window close), never polled. Runs
+/// off the main thread: the process snapshot takes a few milliseconds.
+#[tauri::command(async)]
 pub fn get_terminal_agents(
     manager: State<'_, PtyManager>,
     ids: Vec<String>,
