@@ -72,7 +72,7 @@ impl Activity {
         self.prompts.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn quiet_for(&self, now: u64) -> Option<Duration> {
+    pub fn quiet_for(&self, now: u64) -> Option<Duration> {
         match self.last_output_ms.load(Ordering::Relaxed) {
             0 => None,
             last => Some(Duration::from_millis(now.saturating_sub(last))),

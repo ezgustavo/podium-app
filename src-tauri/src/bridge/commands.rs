@@ -40,6 +40,16 @@ Notes
   podium note append \"Note\" \"content\"
   podium note create [\"content\"] [--name \"Name\"]   new note linked to you
 
+Missions (orchestrators): a task board run by recruits in git worktrees, merged and verified by Podium
+  podium mission start \"Title\" [--verify \"npm run build\"] [--setup \"npm ci\"] [--base <branch>]
+  podium task add \"Title\" --files \"src/a/**,src/b.ts\" [--deps t1,t2] [--agent claude] [--model m] [--file brief.md]
+  podium task run --all                       start everything that can run (or: podium task run t3)
+  podium mission status                       the board; also: podium task retry t3 | podium task cancel t3
+  podium mission finish                       when every task is settled (podium mission stop aborts)
+Workers (recruits running a mission task)
+  podium done \"summary\"                       commit and submit your branch for merge
+  podium fail \"why\"                           give up on the task
+
 Orchestrators (terminals with the orchestrator switch on)
   podium spawn \"Name\" [--agent claude|codex|opencode|shell] [--dir <path>] [--model <m>] [--role \"..\"] [--prompt \"..\"]
   podium dismiss \"Name\"                      close a recruit you spawned
@@ -69,7 +79,117 @@ pub fn run(inner: &Arc<Inner>, caller: &Caller, argv: &[String]) -> Reply {
         "dismiss" => cmd_dismiss(inner, caller, &args),
         "connect" => cmd_connect(inner, caller, &args),
         "hook" => cmd_hook(inner, caller, &args),
+        "mission" => cmd_mission(inner, caller, &args),
+        "task" | "tasks" => cmd_task(inner, caller, &args),
+        "done" => match text_arg(caller, &args, 0) {
+            Ok(Some(summary)) if !summary.trim().is_empty() => {
+                result(inner.task_done(&caller.id, summary.trim()))
+            }
+            Ok(_) => Reply::err("usage: podium done \"<summary of what changed>\""),
+            Err(e) => Reply::err(e),
+        },
+        "fail" => match text_arg(caller, &args, 0) {
+            Ok(Some(reason)) if !reason.trim().is_empty() => {
+                result(inner.task_fail(&caller.id, reason.trim()))
+            }
+            Ok(_) => Reply::err("usage: podium fail \"<why>\""),
+            Err(e) => Reply::err(e),
+        },
         other => Reply::err(format!("unknown command '{other}'. Run `podium help`.")),
+    }
+}
+
+fn result(outcome: Result<String, String>) -> Reply {
+    match outcome {
+        Ok(text) => Reply::ok(text),
+        Err(e) => Reply::err(e),
+    }
+}
+
+fn list_arg(args: &Args, name: &str) -> Vec<String> {
+    args.get(name)
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn cmd_mission(inner: &Arc<Inner>, caller: &Caller, args: &Args) -> Reply {
+    let graph = inner.graph();
+    if let Err(r) = require_orchestrator(&graph, caller) {
+        return r;
+    }
+    match args.pos(0).unwrap_or("status") {
+        "start" => {
+            let Some(title) = args.pos(1).map(str::trim).filter(|t| !t.is_empty()) else {
+                return Reply::err("usage: podium mission start \"Title\" [--verify \"cmd\"] [--setup \"cmd\"] [--base <branch>]");
+            };
+            result(inner.mission_start(
+                &caller.id,
+                &caller.cwd,
+                title,
+                args.get("verify").map(str::to_owned),
+                args.get("setup").map(str::to_owned),
+                args.get("base").map(str::to_owned),
+            ))
+        }
+        "status" => result(inner.mission_status(&caller.id)),
+        "stop" => result(inner.mission_stop(&caller.id, false)),
+        "finish" => result(inner.mission_stop(&caller.id, true)),
+        other => Reply::err(format!("unknown mission command '{other}' (start, status, stop, finish)")),
+    }
+}
+
+fn cmd_task(inner: &Arc<Inner>, caller: &Caller, args: &Args) -> Reply {
+    let graph = inner.graph();
+    if let Err(r) = require_orchestrator(&graph, caller) {
+        return r;
+    }
+    match args.pos(0).unwrap_or("list") {
+        "add" => {
+            let Some(title) = args.pos(1).map(str::trim).filter(|t| !t.is_empty()) else {
+                return Reply::err("usage: podium task add \"Title\" --files \"src/a/**,b.ts\" [--deps t1,t2] [--agent claude] [--prompt \"...\" | --file brief.md | --stdin]");
+            };
+            let prompt = match text_arg(caller, args, 2) {
+                Ok(text) => text.or_else(|| args.get("prompt").map(str::to_owned)).unwrap_or_default(),
+                Err(e) => return Reply::err(e),
+            };
+            let settings = inner.settings();
+            let agent = args.get("agent").unwrap_or(&settings.default_agent).to_lowercase();
+            if !matches!(agent.as_str(), "claude" | "codex" | "opencode") {
+                return Reply::err("tasks run on claude, codex or opencode");
+            }
+            result(inner.task_add(
+                &caller.id,
+                super::mission::NewTask {
+                    title: title.to_owned(),
+                    prompt: if prompt.trim().is_empty() {
+                        title.to_owned()
+                    } else {
+                        prompt
+                    },
+                    files: list_arg(args, "files"),
+                    deps: list_arg(args, "deps"),
+                    agent,
+                    model: args.get("model").map(str::to_owned),
+                },
+            ))
+        }
+        "list" | "status" => result(inner.mission_status(&caller.id)),
+        "run" => result(inner.task_run(&caller.id, args.pos(1).filter(|_| !args.has("all")))),
+        "retry" => match args.pos(1) {
+            Some(id) => result(inner.task_retry(&caller.id, id)),
+            None => Reply::err("usage: podium task retry t3"),
+        },
+        "cancel" => match args.pos(1) {
+            Some(id) => result(inner.task_cancel(&caller.id, id)),
+            None => Reply::err("usage: podium task cancel t3"),
+        },
+        other => Reply::err(format!("unknown task command '{other}' (add, list, run, retry, cancel)")),
     }
 }
 
@@ -823,6 +943,14 @@ fn cmd_hook(inner: &Arc<Inner>, caller: &Caller, args: &Args) -> Reply {
 /// Commands recruits may never run: integration and publishing stay with
 /// the orchestrator and, ultimately, the user.
 fn guard_tool(inner: &Arc<Inner>, caller: &Caller, payload: &Value) -> Option<String> {
+    let tool = payload.get("tool_name").and_then(Value::as_str).unwrap_or_default();
+    if matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+        let file = payload
+            .pointer("/tool_input/file_path")
+            .or_else(|| payload.pointer("/tool_input/notebook_path"))
+            .and_then(Value::as_str)?;
+        return inner.lease_violation(&caller.id, file);
+    }
     let graph = inner.graph();
     let recruit = graph.node(&caller.id).is_some_and(|n| n.parent.is_some());
     if !recruit || !inner.settings().guard_git {

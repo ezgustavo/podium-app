@@ -1707,6 +1707,126 @@ pub fn free_memory_mb() -> Option<u64> {
     None
 }
 
+
+// ---------------------------------------------------------------------------
+// Child processes and power management for missions
+// ---------------------------------------------------------------------------
+
+/// `std::process::Command` that never flashes a console window on Windows
+/// (the release app has no console; child console programs would open one).
+pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Runs `command` through the platform shell (`cmd /D /S /C` on Windows,
+/// `sh -c` on Unix) without a console window.
+pub fn shell_exec(command: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = hidden_command("cmd");
+        cmd.args(["/D", "/S", "/C"]);
+        cmd.raw_arg(format!("\"{command}\""));
+        cmd
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = hidden_command("sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    }
+}
+
+/// Holds the "keep the machine awake" request while it lives.
+#[cfg(windows)]
+struct AwakeHandle {
+    /// Dropping it ends the holder thread, which clears the request.
+    _release: mpsc::Sender<()>,
+}
+
+#[cfg(windows)]
+fn acquire_awake() -> Option<AwakeHandle> {
+    use windows_sys::Win32::System::Power::{
+        SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
+    };
+    // The execution state belongs to the calling thread, so a dedicated
+    // thread holds it until the handle is dropped.
+    let (tx, rx) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        // SAFETY: plain Win32 call with flag constants.
+        unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
+        let _ = rx.recv();
+        // SAFETY: as above; clears the requirement for this thread.
+        unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+    });
+    Some(AwakeHandle { _release: tx })
+}
+
+#[cfg(unix)]
+struct AwakeHandle(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for AwakeHandle {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn acquire_awake() -> Option<AwakeHandle> {
+    // -i: no idle sleep; -w: released automatically if Podium dies.
+    hidden_command("caffeinate")
+        .args(["-i", "-w", &std::process::id().to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()
+        .map(AwakeHandle)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn acquire_awake() -> Option<AwakeHandle> {
+    hidden_command("systemd-inhibit")
+        .args([
+            "--what=sleep:idle",
+            "--who=Podium",
+            "--why=Agent mission running",
+            "--mode=block",
+            "sleep",
+            "infinity",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()
+        .map(AwakeHandle)
+}
+
+static KEEP_AWAKE: Mutex<Option<AwakeHandle>> = Mutex::new(None);
+
+/// Keeps the machine from sleeping while missions run (the display may
+/// still turn off). Idempotent.
+pub fn set_keep_awake(on: bool) {
+    let Ok(mut slot) = KEEP_AWAKE.lock() else {
+        return;
+    };
+    match (on, slot.is_some()) {
+        (true, false) => *slot = acquire_awake(),
+        (false, true) => *slot = None,
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Access for the agent bridge
 // ---------------------------------------------------------------------------

@@ -36,3 +36,23 @@ Rules: messages to a busy agent are queued until it is idle, so never resend. If
 5. Do the delegation through Podium; do not use your own built-in sub-agents for work the user asked to distribute.
 
 Recruits may not push, open or merge PRs; integration is yours, publishing is the user's.
+
+## Missions (orchestrators): unattended, overnight work
+
+Use a mission when the user hands you a body of work to finish on your own (often a note with a brief, run with the note's Run button).
+
+1. Read the brief and explore the repository enough to plan.
+2. `podium mission start "Short title" --verify "<command proving the project builds and tests pass>" [--setup "<dependency install, e.g. npm ci>"]` creates an integration branch `podium/<id>` in its own worktree. Nothing touches the user's checkout.
+3. Split the work into tasks with **disjoint file scopes** and a self-contained brief each (goal, files, acceptance criteria):
+   `podium task add "Title" --files "src/auth/**,src/api/login.ts" [--deps t1] [--agent claude|codex] [--model m] --file brief.md`
+   Tasks whose scopes overlap never run at the same time; a task without `--files` runs alone.
+4. `podium task run --all`. Podium starts a recruit per task in its own worktree and branch, as slots and memory allow, and later tasks as their dependencies merge.
+5. Workers finish with `podium done "summary"`. Podium commits, merges the branch into the integration branch, runs the verify command, and only then counts the task. Conflicts and failed checks go back to the worker that wrote the change; repeated failures come to you, then to the user.
+6. You get a message for every merge and problem. React to them: unblock workers (`podium check`, `podium ask`), `podium task retry t3`, `podium task cancel t3`, add tasks that turn out to be needed. `podium mission status` shows the board at any time (use it after a restart or context compaction).
+7. When Podium says every task is settled, write the report note (`podium note create --name "Mission report" --file report.md`: what changed per task, checks run, what failed and why, how to review), then `podium mission finish`.
+
+Never push, open PRs or merge into the user's branches: the user reviews `podium/<id>` and decides.
+
+## Mission workers
+
+If your first prompt says you are a worker on a mission: stay inside your worktree, edit only your files (edits to files another running task owns are blocked; ask the orchestrator if you need one), commit, run the verify command if given, then `podium done "summary"`. If you cannot finish, `podium fail "why"`. When Podium reports a conflict or failed check, fix it in your worktree and run `podium done` again.

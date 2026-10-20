@@ -18,6 +18,7 @@ mod args;
 mod commands;
 mod graph;
 pub mod launch;
+mod mission;
 
 use agents::{Activity, AgentEntry, AgentState, Agents, AskOutcome, Envelope};
 pub use graph::GraphSnapshot;
@@ -42,6 +43,10 @@ const MAX_REQUEST_BYTES: u64 = 8 * 1024 * 1024;
 const UI_TIMEOUT: Duration = Duration::from_secs(30);
 /// Watchdog period: idle detection and inbox delivery.
 const TICK: Duration = Duration::from_millis(250);
+/// Mission scheduling and stuck detection run every this many ticks.
+const SLOW_TICKS: u64 = 8;
+/// A recruit waiting on a prompt (permission, menu) this long is reported.
+const WAITING_REPORT: Duration = Duration::from_secs(180);
 /// Appended to prompts that expect an answer.
 const REPLY_FOOTER: &str = "\n\n(When you are done, answer with: podium reply \"<your answer>\". For a long answer, write it to a file and run: podium reply --file <path>)";
 /// Pause between pasting a prompt and submitting it, so the TUI has
@@ -63,6 +68,7 @@ pub(crate) struct Inner {
     state: Mutex<BridgeState>,
     ui_seq: AtomicU64,
     ui_pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
+    missions: mission::Missions,
 }
 
 #[derive(Default)]
@@ -142,11 +148,11 @@ impl Bridge {
         let cli_dir = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(PathBuf::from));
-        let claude_settings = app
-            .path()
-            .app_data_dir()
-            .ok()
-            .and_then(|dir| launch::write_claude_settings(&dir).ok());
+        let app_data = app.path().app_data_dir().ok();
+        let claude_settings = app_data
+            .as_deref()
+            .and_then(|dir| launch::write_claude_settings(dir).ok());
+        let missions = mission::Missions::load(app_data.as_deref());
         let inner = Arc::new(Inner {
             app,
             port,
@@ -155,6 +161,7 @@ impl Bridge {
             state: Mutex::new(BridgeState::default()),
             ui_seq: AtomicU64::new(1),
             ui_pending: Mutex::new(HashMap::new()),
+            missions,
         });
 
         let server = Arc::clone(&inner);
@@ -168,9 +175,17 @@ impl Bridge {
         });
 
         let watchdog = Arc::clone(&inner);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(TICK);
-            watchdog.tick();
+        std::thread::spawn(move || {
+            let mut beat: u64 = 0;
+            loop {
+                std::thread::sleep(TICK);
+                watchdog.tick();
+                beat += 1;
+                if beat.is_multiple_of(SLOW_TICKS) {
+                    watchdog.stuck_tick();
+                    watchdog.mission_tick();
+                }
+            }
         });
 
         Ok(Bridge { inner })
@@ -384,6 +399,62 @@ impl Inner {
         }
     }
 
+    /// Reports recruits that sit working or waiting with no output for too
+    /// long to their orchestrator, once per stretch.
+    fn stuck_tick(&self) {
+        let threshold = Duration::from_secs(self.settings().stuck_minutes.max(1) * 60);
+        let now = agents::now_ms();
+        let graph = self.graph();
+        let mut reports = Vec::new();
+        {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            for (id, entry) in &mut state.agents.entries {
+                if entry.stuck_reported {
+                    continue;
+                }
+                let limit = match entry.state {
+                    AgentState::Working => threshold,
+                    AgentState::WaitingInput => WAITING_REPORT,
+                    _ => continue,
+                };
+                let quiet = entry
+                    .activity
+                    .quiet_for(now)
+                    .unwrap_or_else(|| entry.since.elapsed());
+                if quiet < limit || entry.since.elapsed() < limit {
+                    continue;
+                }
+                let Some(parent) = graph.node(id).and_then(|n| n.parent.clone()) else {
+                    continue;
+                };
+                entry.stuck_reported = true;
+                reports.push((id.clone(), parent, entry.state, quiet));
+            }
+        }
+        for (id, parent, state, quiet) in reports {
+            let name = self.name_of(&id);
+            let screen = self.pty().screen_text(&id).unwrap_or_default();
+            let tail: Vec<&str> = screen.lines().rev().take(15).collect();
+            let tail: Vec<&str> = tail.into_iter().rev().collect();
+            self.enqueue(
+                &parent,
+                Envelope {
+                    from: None,
+                    text: format!(
+                        "[Podium] Recruit \"{name}\" has been {} with no output for {} min. End of its screen:\n{}\nAnswer a prompt with `podium ask \"{name}\" --raw \"...\"`, check it with `podium check \"{name}\"`, or replace it with `podium dismiss`.",
+                        state.label(),
+                        quiet.as_secs() / 60,
+                        tail.join("\n")
+                    ),
+                    raw: false,
+                    ask: None,
+                },
+            );
+        }
+    }
+
     /// Writes one message into a terminal.
     fn deliver(&self, id: &str, envelope: Envelope) {
         let pty = self.pty();
@@ -594,4 +665,36 @@ pub fn bridge_agent_states(bridge: State<'_, Bridge>) -> Result<HashMap<String, 
 pub fn bridge_agent_command(bridge: State<'_, Bridge>, agent: String, recruit: bool) -> String {
     let settings = bridge.inner.settings();
     launch::agent_command(&agent, &settings, bridge.inner.claude_settings.as_deref(), recruit, None)
+}
+
+/// Every mission known to the backend (the panel's initial state).
+#[tauri::command]
+pub fn bridge_missions(bridge: State<'_, Bridge>) -> Result<Vec<mission::Mission>, String> {
+    let book = bridge.inner.missions.book.lock().map_err(|e| e.to_string())?;
+    Ok(book.missions.clone())
+}
+
+/// Hands the mission brief in `note_id` to the orchestrator wired to it.
+#[tauri::command]
+pub fn bridge_run_note(bridge: State<'_, Bridge>, note_id: String) -> Result<String, String> {
+    let graph = bridge.inner.graph();
+    let note = graph
+        .node(&note_id)
+        .ok_or_else(|| String::from("note not found"))?;
+    let orchestrator = graph
+        .orchestrators_of_note(&note_id)
+        .into_iter()
+        .next()
+        .ok_or_else(|| String::from("connect this note to an orchestrator terminal first"))?;
+    let text = mission::run_brief_prompt(&note.name);
+    bridge.inner.enqueue(
+        &orchestrator.id,
+        Envelope {
+            from: None,
+            text,
+            raw: false,
+            ask: None,
+        },
+    );
+    Ok(orchestrator.name.clone())
 }

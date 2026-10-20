@@ -2,6 +2,7 @@ mod bridge;
 mod pty;
 mod settings;
 mod workspace;
+mod worktree;
 
 use tauri::Manager;
 
@@ -29,6 +30,8 @@ pub fn run() {
             bridge::bridge_sync_settings,
             bridge::bridge_agent_states,
             bridge::bridge_agent_command,
+            bridge::bridge_missions,
+            bridge::bridge_run_note,
             bridge::launch::install_agent_skills,
             workspace::save_workspace,
             workspace::load_workspace,

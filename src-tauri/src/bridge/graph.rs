@@ -172,6 +172,15 @@ impl Graph {
             .find(|n| same_name(&n.name, name))
     }
 
+    /// Orchestrator terminals wired to a note, directly or through a chain.
+    pub fn orchestrators_of_note(&self, note: &str) -> Vec<&Node> {
+        self.nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Terminal && n.orchestrator)
+            .filter(|n| self.reachable_notes(&n.id).iter().any(|(_, x)| x.id == note))
+            .collect()
+    }
+
     pub fn terminal_names(&self) -> Vec<&str> {
         self.nodes
             .iter()
