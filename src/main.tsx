@@ -13,9 +13,13 @@ startBridge();
 
 // E2E hooks for the dev build (driven over CDP); stripped from production.
 if (import.meta.env.DEV) {
-  void import("./store/workspace").then(({ useWorkspaceStore }) => {
-    Object.assign(window, { __podium: { workspace: useWorkspaceStore } });
-  });
+  void Promise.all([import("./store/workspace"), import("./lib/bridge")]).then(
+    ([{ useWorkspaceStore }, { useAgentStates }]) => {
+      Object.assign(window, {
+        __podium: { workspace: useWorkspaceStore, agents: useAgentStates },
+      });
+    },
+  );
 }
 
 // Hidden webviews throttle timers, so xterm would fall behind busy agents;

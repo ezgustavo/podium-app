@@ -219,11 +219,20 @@ impl Bridge {
 
     /// The terminal's process is gone: its token stops working and anyone
     /// waiting on it is told.
-    pub fn unregister_terminal(&self, id: &str) {
+    pub fn unregister_terminal(&self, id: &str, activity: &Arc<Activity>) {
         let orphaned = {
             let Ok(mut state) = self.inner.state.lock() else {
                 return;
             };
+            // A newer process may have been registered under the same id.
+            let current = state
+                .agents
+                .entries
+                .get(id)
+                .is_some_and(|e| Arc::ptr_eq(&e.activity, activity));
+            if !current {
+                return;
+            }
             state.tokens.retain(|_, owner| owner != id);
             if let Some(entry) = state.agents.entries.get_mut(id) {
                 entry.set_state(AgentState::Exited);

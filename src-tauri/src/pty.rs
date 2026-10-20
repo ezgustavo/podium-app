@@ -294,11 +294,16 @@ pub fn create_terminal(
     rows: u16,
     on_output: Channel<Response>,
 ) -> Result<(), String> {
-    {
-        let sessions = manager.sessions.lock().map_err(|e| e.to_string())?;
-        if sessions.contains_key(&id) {
-            return Err(format!("terminal '{id}' already exists"));
-        }
+    // The view owns the terminal: a session still registered under this id
+    // belongs to a view that is gone (webview reload) and only feeds a dead
+    // output channel, so it is replaced.
+    let orphan = manager
+        .sessions
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(&id);
+    if let Some(mut orphan) = orphan {
+        let _ = orphan.killer.kill();
     }
 
     let pty_system = native_pty_system();
@@ -400,15 +405,26 @@ pub fn create_terminal(
             }
         }
         // Dropping both senders (ours and the session's) closes the channel:
-        // the emitter flushes what is left, then the exit is announced.
+        // the emitter flushes what is left, then the exit is announced. A
+        // session already removed (killed by its view, or replaced by a new
+        // one under the same id) has nobody left to tell.
         drop(output_tx);
-        if let Ok(mut sessions) = sessions.lock() {
-            sessions.remove(&id);
-        }
+        let owned = sessions.lock().is_ok_and(|mut sessions| {
+            let ours = sessions
+                .get(&id)
+                .is_some_and(|s| Arc::ptr_eq(&s.screen, &screen));
+            if ours {
+                sessions.remove(&id);
+            }
+            ours
+        });
         let _ = emitter.join();
-        app.state::<crate::bridge::Bridge>().unregister_terminal(&id);
+        app.state::<crate::bridge::Bridge>()
+            .unregister_terminal(&id, &activity);
         let exit_code = child.wait().ok().map(|status| status.exit_code());
-        let _ = app.emit(&format!("terminal-exit:{id}"), exit_code);
+        if owned {
+            let _ = app.emit(&format!("terminal-exit:{id}"), exit_code);
+        }
     });
 
     Ok(())
