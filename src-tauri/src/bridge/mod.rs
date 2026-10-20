@@ -43,6 +43,8 @@ const MAX_REQUEST_BYTES: u64 = 8 * 1024 * 1024;
 const UI_TIMEOUT: Duration = Duration::from_secs(30);
 /// Watchdog period: idle detection and inbox delivery.
 const TICK: Duration = Duration::from_millis(250);
+/// Memory of every terminal's process tree is reported every this many ticks.
+const MEMORY_TICKS: u64 = 40;
 /// Startup dialogs of recruits are answered every this many ticks.
 const DIALOG_TICKS: u64 = 3;
 /// Mission scheduling and stuck detection run every this many ticks.
@@ -183,6 +185,12 @@ impl Bridge {
                 std::thread::sleep(TICK);
                 watchdog.tick();
                 beat += 1;
+                if beat.is_multiple_of(MEMORY_TICKS) {
+                    let memory = watchdog.pty().tree_memory_mb();
+                    if !memory.is_empty() {
+                        let _ = watchdog.app.emit("terminal-memory", memory);
+                    }
+                }
                 if beat.is_multiple_of(DIALOG_TICKS) {
                     watchdog.answer_startup_dialogs();
                 }

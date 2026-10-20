@@ -1057,3 +1057,10 @@ body {
   color: #f7768e;
   background: #f7768e1f;
 }
+
+.terminal-node__memory {
+  font-size: 10px;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}

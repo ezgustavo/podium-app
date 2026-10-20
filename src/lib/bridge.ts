@@ -24,6 +24,10 @@ export type AgentState =
  *  React Flow nodes so state changes never re-render the canvas. */
 export const useAgentStates = create<Record<string, AgentState>>(() => ({}));
 
+/** Resident memory (MB) of each terminal's process tree, pushed every few
+ *  seconds by the backend. */
+export const useTerminalMemory = create<Record<string, number>>(() => ({}));
+
 const NOTE_NAME_MAX = 60;
 
 /** A note's name: its explicit name, else its first non-empty line without
@@ -238,6 +242,10 @@ export function startBridge(): void {
   void invoke<Record<string, AgentState>>("bridge_agent_states")
     .then((states) => useAgentStates.setState(states))
     .catch(() => {});
+
+  void listen<Record<string, number>>("terminal-memory", (event) => {
+    useTerminalMemory.setState(event.payload, true);
+  });
 
   void listen<BridgeRequest>("bridge-request", (event) => {
     const request = event.payload;

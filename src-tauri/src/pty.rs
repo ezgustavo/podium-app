@@ -1827,6 +1827,106 @@ pub fn set_keep_awake(on: bool) {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Memory per terminal (process tree resident size)
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn process_resident_bytes(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: plain Win32 calls; the handle is closed before returning and
+    // the counters struct is sized as the API expects.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        let size = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?;
+        counters.cb = size;
+        let ok = GetProcessMemoryInfo(handle, &mut counters, size);
+        CloseHandle(handle);
+        (ok != 0).then_some(counters.WorkingSetSize as u64)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_resident_bytes(pid: u32) -> Option<u64> {
+    let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
+    let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    // SAFETY: sysconf has no preconditions.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    Some(pages * u64::try_from(page).ok()?)
+}
+
+#[cfg(target_os = "macos")]
+fn process_resident_bytes(pid: u32) -> Option<u64> {
+    use std::mem::{size_of, MaybeUninit};
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let size = libc::c_int::try_from(size_of::<libc::proc_taskinfo>()).ok()?;
+    let mut info = MaybeUninit::<libc::proc_taskinfo>::zeroed();
+    // SAFETY: the buffer is a zeroed proc_taskinfo of exactly `size` bytes.
+    let written = unsafe {
+        libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, info.as_mut_ptr().cast(), size)
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: proc_pidinfo filled the whole struct (checked above).
+    Some(unsafe { info.assume_init() }.pti_resident_size)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn process_resident_bytes(_pid: u32) -> Option<u64> {
+    None
+}
+
+fn tree_resident_bytes<S: ProcessSource>(src: &mut S, root: u32) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![root];
+    let mut visited = 0usize;
+    while let Some(pid) = stack.pop() {
+        visited += 1;
+        if visited > AGENT_MAX_VISITED {
+            break;
+        }
+        total += process_resident_bytes(pid).unwrap_or(0);
+        stack.extend(src.children(pid));
+    }
+    total
+}
+
+impl PtyManager {
+    /// Resident memory (MB) of every running terminal's process tree: the
+    /// shell plus whatever agent runs in it. One process snapshot per call.
+    pub fn tree_memory_mb(&self) -> HashMap<String, u64> {
+        let roots: Vec<(String, u32)> = match self.sessions.lock() {
+            Ok(sessions) => sessions
+                .iter()
+                .filter_map(|(id, s)| Some((id.clone(), s.pid?)))
+                .collect(),
+            Err(_) => return HashMap::new(),
+        };
+        if roots.is_empty() {
+            return HashMap::new();
+        }
+        let Some(mut processes) = system_processes() else {
+            return HashMap::new();
+        };
+        roots
+            .into_iter()
+            .map(|(id, pid)| (id, tree_resident_bytes(&mut processes, pid) / (1024 * 1024)))
+            .collect()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Access for the agent bridge
 // ---------------------------------------------------------------------------

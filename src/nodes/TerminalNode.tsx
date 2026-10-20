@@ -21,7 +21,12 @@ import * as pty from "../lib/pty";
 import { resumeCommand } from "../lib/agents";
 import { enqueueLaunch } from "../lib/launchQueue";
 import { registerRenderer } from "../lib/webglBudget";
-import { reportSpawned, useAgentStates, type AgentState } from "../lib/bridge";
+import {
+  reportSpawned,
+  useAgentStates,
+  useTerminalMemory,
+  type AgentState,
+} from "../lib/bridge";
 
 type TerminalStatus = "idle" | "starting" | "running" | "exited";
 
@@ -172,6 +177,7 @@ function TerminalNodeComponent({
   const updateNodeData = useWorkspaceStore((s) => s.updateNodeData);
   const removeNode = useWorkspaceStore((s) => s.removeNode);
   const agentState = useAgentStates((s) => s[id]);
+  const memoryMb = useTerminalMemory((s) => s[id]);
   const badge =
     status === "running" && agentState ? AGENT_BADGES[agentState] : undefined;
 
@@ -570,6 +576,11 @@ function TerminalNodeComponent({
             className={`terminal-node__agent terminal-node__agent--${agentState}`}
           >
             {badge}
+          </span>
+        )}
+        {status === "running" && memoryMb !== undefined && memoryMb >= 100 && (
+          <span className="terminal-node__memory" title="Memory of this terminal and its agent">
+            {memoryMb >= 1024 ? `${(memoryMb / 1024).toFixed(1)} GB` : `${memoryMb} MB`}
           </span>
         )}
         <span className="terminal-node__command">
