@@ -850,21 +850,6 @@ body {
   opacity: 1;
 }
 
-.settings__action {
-  height: 26px;
-  padding: 0 12px;
-  border: 1px solid #2f3442;
-  border-radius: 5px;
-  background: #1f232c;
-  color: #d4d7dd;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.settings__action:hover {
-  border-color: #7aa2f7;
-}
-
 /* ---- Missions ---- */
 
 .note-node__run {

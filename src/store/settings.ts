@@ -5,6 +5,8 @@ export type ResumeMode = "manual" | "auto";
 
 export type Autonomy = "full" | "edits" | "ask";
 export type AgentName = "claude" | "codex" | "opencode" | "shell";
+/** Claude Code model alias for recruits; "" = the CLI's default. */
+export type RecruitModel = "" | "opus" | "sonnet" | "haiku";
 
 export interface OrchestrationSettings {
   autonomy: Autonomy;
@@ -13,6 +15,9 @@ export interface OrchestrationSettings {
   defaultAgent: AgentName;
   stuckMinutes: number;
   guardGit: boolean;
+  recruitModel: RecruitModel;
+  /** Install and update the `podium` skill for Claude Code and Codex. */
+  syncSkills: boolean;
 }
 
 export interface PodiumSettings {
@@ -29,15 +34,18 @@ export const DEFAULT_SETTINGS: PodiumSettings = {
   orchestration: {
     autonomy: "full",
     maxRecruits: 6,
-    minFreeMemoryMb: 1500,
+    minFreeMemoryMb: 3000,
     defaultAgent: "claude",
     stuckMinutes: 15,
     guardGit: true,
+    recruitModel: "sonnet",
+    syncSkills: true,
   },
 };
 
 export const AGENT_NAMES: readonly AgentName[] = ["claude", "codex", "opencode", "shell"];
 const AUTONOMY_LEVELS: readonly Autonomy[] = ["full", "edits", "ask"];
+const RECRUIT_MODELS: readonly RecruitModel[] = ["", "opus", "sonnet", "haiku"];
 
 export const FONT_SIZE_MIN = 10;
 export const FONT_SIZE_MAX = 20;
@@ -115,6 +123,7 @@ function parseSettings(raw: unknown): PodiumSettings {
   const defaults = DEFAULT_SETTINGS;
   const autonomy = orchestration.autonomy;
   const defaultAgent = orchestration.defaultAgent;
+  const recruitModel = orchestration.recruitModel;
 
   const resumeMode = sessions.resumeMode;
   const fontSize = terminal.fontSize;
@@ -181,6 +190,14 @@ function parseSettings(raw: unknown): PodiumSettings {
         orchestration,
         "guardGit",
         defaults.orchestration.guardGit,
+      ),
+      recruitModel: RECRUIT_MODELS.includes(recruitModel as RecruitModel)
+        ? (recruitModel as RecruitModel)
+        : defaults.orchestration.recruitModel,
+      syncSkills: readBoolean(
+        orchestration,
+        "syncSkills",
+        defaults.orchestration.syncSkills,
       ),
     },
   };

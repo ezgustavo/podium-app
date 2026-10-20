@@ -11,8 +11,12 @@ import {
   clampFontSize,
   useSettingsStore,
 } from "../store/settings";
-import type { AgentName, Autonomy, ResumeMode } from "../store/settings";
-import { installAgentSkills } from "../lib/bridge";
+import type {
+  AgentName,
+  Autonomy,
+  RecruitModel,
+  ResumeMode,
+} from "../store/settings";
 
 type CategoryId = "sessions" | "terminal" | "shortcuts" | "orchestration";
 
@@ -27,6 +31,13 @@ const AUTONOMY_OPTIONS: { value: Autonomy; label: string }[] = [
   { value: "full", label: "Full" },
   { value: "edits", label: "Edits" },
   { value: "ask", label: "Ask" },
+];
+
+const MODEL_OPTIONS: { value: RecruitModel; label: string }[] = [
+  { value: "", label: "Default" },
+  { value: "opus", label: "Opus" },
+  { value: "sonnet", label: "Sonnet" },
+  { value: "haiku", label: "Haiku" },
 ];
 
 const AGENT_OPTIONS: { value: AgentName; label: string }[] = [
@@ -179,8 +190,6 @@ function Stepper({
 function OrchestrationSection() {
   const o = useSettingsStore((s) => s.settings.orchestration);
   const update = useSettingsStore((s) => s.update);
-  const [skills, setSkills] = useState<string | null>(null);
-  const skillsLabelId = useId();
 
   return (
     <>
@@ -195,6 +204,12 @@ function OrchestrationSection() {
         value={o.defaultAgent}
         options={AGENT_OPTIONS}
         onChange={(defaultAgent) => update("orchestration", { defaultAgent })}
+      />
+      <Segmented
+        label="Recruit model"
+        value={o.recruitModel}
+        options={MODEL_OPTIONS}
+        onChange={(recruitModel) => update("orchestration", { recruitModel })}
       />
       <Stepper
         label="Max recruits"
@@ -229,21 +244,11 @@ function OrchestrationSection() {
         checked={o.guardGit}
         onChange={(guardGit) => update("orchestration", { guardGit })}
       />
-      <Row label="Agent skills" labelId={skillsLabelId}>
-        <button
-          type="button"
-          className="settings__action"
-          aria-labelledby={skillsLabelId}
-          onClick={() => {
-            setSkills("…");
-            void installAgentSkills()
-              .then(() => setSkills("Installed"))
-              .catch((err: unknown) => setSkills(String(err)));
-          }}
-        >
-          {skills ?? "Install"}
-        </button>
-      </Row>
+      <Toggle
+        label="Keep agent skills installed"
+        checked={o.syncSkills}
+        onChange={(syncSkills) => update("orchestration", { syncSkills })}
+      />
     </>
   );
 }

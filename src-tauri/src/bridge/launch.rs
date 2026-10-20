@@ -21,6 +21,9 @@ pub struct OrchestrationSettings {
     pub stuck_minutes: u64,
     /// Recruits may not push, open or merge PRs.
     pub guard_git: bool,
+    /// Claude model alias recruits start with unless one is asked for
+    /// ("" = the CLI's own default).
+    pub recruit_model: String,
 }
 
 impl Default for OrchestrationSettings {
@@ -28,10 +31,11 @@ impl Default for OrchestrationSettings {
         OrchestrationSettings {
             autonomy: String::from("full"),
             max_recruits: 6,
-            min_free_memory_mb: 1500,
+            min_free_memory_mb: 3000,
             default_agent: String::from("claude"),
             stuck_minutes: 15,
             guard_git: true,
+            recruit_model: String::from("sonnet"),
         }
     }
 }
@@ -118,7 +122,9 @@ pub fn agent_command(
         "opencode" => parts.push(String::from("opencode")),
         _ => return String::new(),
     }
-    if let Some(model) = model.filter(|m| is_safe_token(m)) {
+    let fallback = (recruit && agent == "claude" && !settings.recruit_model.is_empty())
+        .then_some(settings.recruit_model.as_str());
+    if let Some(model) = model.or(fallback).filter(|m| is_safe_token(m)) {
         parts.push(String::from("--model"));
         parts.push(model.to_owned());
     }
@@ -145,8 +151,10 @@ fn env_dir(key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Writes the skill into the user's Claude Code and Codex skill folders.
-#[tauri::command]
+/// Writes the skill into the user's Claude Code and Codex skill folders
+/// (only the `podium` skill folder, and only when its content changed).
+/// Runs at startup while the setting is on, so new versions update it.
+#[tauri::command(async)]
 pub fn install_agent_skills() -> Result<(), String> {
     let home = env_dir("USERPROFILE")
         .or_else(|| env_dir("HOME"))
@@ -157,8 +165,12 @@ pub fn install_agent_skills() -> Result<(), String> {
     ];
     for root in roots {
         let dir = root.join("skills").join("podium");
+        let file = dir.join("SKILL.md");
+        if std::fs::read_to_string(&file).is_ok_and(|current| current == SKILL) {
+            continue;
+        }
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        std::fs::write(dir.join("SKILL.md"), SKILL).map_err(|e| e.to_string())?;
+        std::fs::write(&file, SKILL).map_err(|e| e.to_string())?;
     }
     Ok(())
 }

@@ -219,12 +219,23 @@ export function startBridge(): void {
   });
   syncGraph();
 
+  let skillsSynced = false;
   const syncSettings = () => {
     const { settings, loaded } = useSettingsStore.getState();
     if (!loaded) return;
     void invoke("bridge_sync_settings", {
       settings: settings.orchestration,
     }).catch(() => {});
+    // Once per launch (and when switched on): writes only if the bundled
+    // skill differs from the installed one.
+    if (settings.orchestration.syncSkills && !skillsSynced) {
+      skillsSynced = true;
+      void installAgentSkills().catch((err: unknown) => {
+        console.error("Failed to install agent skills:", err);
+      });
+    } else if (!settings.orchestration.syncSkills) {
+      skillsSynced = false;
+    }
   };
   useSettingsStore.subscribe((state, prev) => {
     if (
