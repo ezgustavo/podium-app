@@ -559,7 +559,8 @@ impl Inner {
             status,
             assignee: None,
             worker_name: None,
-            branch: format!("{}/{id}", mission.integration_branch),
+            // A sibling, not a child: git refuses `podium/x/t1` next to `podium/x`.
+            branch: format!("{}-{id}", mission.integration_branch),
             worktree: root.join(&id),
             attempts: 0,
             summary: None,
@@ -930,9 +931,18 @@ impl Inner {
         let Some(task) = mission.task(task_id).cloned() else {
             return;
         };
-        let _ = worktree::remove_worktree(&mission.repo, &task.worktree, Some(&task.branch));
+        // The worker's shell sits inside the worktree, and Windows will not
+        // delete a directory a process is using: close the worker first.
         if let Some(worker) = &task.assignee {
             let _ = self.ui_request("dismiss", json!({ "id": worker }));
+        }
+        for attempt in 0..5 {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(800));
+            }
+            if worktree::remove_worktree(&mission.repo, &task.worktree, Some(&task.branch)).is_ok() {
+                break;
+            }
         }
         let (done, total) = mission.counts();
         self.podium_message(
@@ -969,7 +979,9 @@ impl Inner {
                 .is_none_or(|free| free >= settings.min_free_memory_mb);
             let mut changed = Vec::new();
             for (mi, mission) in book.missions.iter_mut().enumerate() {
-                if mission.state != MissionState::Active {
+                // After a restart, a mission resumes only once its
+                // orchestrator is back on the canvas.
+                if mission.state != MissionState::Active || graph.node(&mission.orchestrator).is_none() {
                     continue;
                 }
                 let other_recruits = graph
